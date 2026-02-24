@@ -4,6 +4,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
+mdp = "admin"
 
 morts = [34,37, 39, 40]
 
@@ -32,7 +33,7 @@ for u in range (1,41):
 
         # 3️⃣ Remplir les champs
         login_name.send_keys(user)
-        login_pass.send_keys("admin")
+        login_pass.send_keys(mdp)
 
         # 4️⃣ Cliquer sur le bouton de connexion
         driver.execute_script("arguments[0].click();", login_button)
