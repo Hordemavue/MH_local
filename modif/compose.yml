@@ -1,0 +1,269 @@
+x-environments:
+  mariadb: &mariadb-config
+    MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-myh0rd3s}
+    MYSQL_DATABASE: ${DB_NAME:-myhordes}
+    MYSQL_USER: ${DB_USER:-myhordes}
+    MYSQL_PASSWORD: ${DB_PASSWORD:-myh0rd3s}
+    MYSQL_SLOW_QUERY_LOG: 1
+    MYSQL_INNODB_LOCK_WAIT_TIMEOUT: 120
+  postgres: &postgres-config
+    POSTGRES_PASSWORD: ${DB_PASSWORD:-myh0rd3s}
+    POSTGRES_DB: ${DB_NAME:-myhordes}
+    POSTGRES_USER: ${DB_USER:-myhordes}
+  php-database: &php-database-config
+    DB_HOST: ${DB_HOST:-mariadb}
+    DB_USER: ${DB_USER:-myhordes}
+    DB_PASSWORD: ${DB_PASSWORD:-myh0rd3s}
+    DB_NAME: ${DB_NAME:-myhordes}
+  php-common: &php-common-config
+    <<: *php-database-config
+    APP_RUNTIME_ENV: "dev"
+    SSMTP_MAILHUB: mailhog:1025
+    PHP_SENDMAIL_PATH: "/usr/sbin/ssmtp -t -f"
+    PHP_EXTENSIONS_DISABLE: igbinary
+    PHP_DATE_TIMEZONE: 'Europe/Berlin'
+    ## Read instructions at https://wodby.com/docs/stacks/php/local/#xdebug
+    PHP_XDEBUG: 1
+    PHP_XDEBUG_MODE: ${XDEBUG_MODE:-off}
+    #PHP_IDE_CONFIG: serverName=my-ide
+    #PHP_XDEBUG_IDEKEY: "my-ide"
+    PHP_XDEBUG_START_WITH_REQUEST: "yes"
+    PHP_XDEBUG_CLIENT_HOST: 172.17.0.1 # Linux
+    #PHP_XDEBUG_CLIENT_HOST: host.docker.internal # Docker 18.03+ Mac/Win
+    #PHP_XDEBUG_CLIENT_HOST: 10.0.75.1 # Windows
+  php-fpm: &php-fpm-config
+    <<: *php-common-config
+    PHP_FPM_USER: wodby
+    PHP_FPM_GROUP: wodby
+  redis: &redis-config
+    REDIS_MAXMEMORY: 512m
+  apache: &apache-config
+    APACHE_LOG_LEVEL: debug
+    APACHE_BACKEND_HOST: php
+    APACHE_VHOST_PRESET: php
+    APACHE_DOCUMENT_ROOT: /var/www/myhordes/public
+  mercure: &mercure-config
+    SERVER_NAME: ':80'
+    MERCURE_PUBLISHER_JWT_KEY: 'BFXWtD72I7truBSgzDUGKyNFtZ3uVeQGpmkBCmucPnrgdeqjgFGobsbzj-jAnMa3P0_kENb11YSwgqgjFeG9RCc'
+    MERCURE_SUBSCRIBER_JWT_KEY: 'BFXWtD72I7truBSgzDUGKyNFtZ3uVeQGpmkBCmucPnrgdeqjgFGobsbzj-jAnMa3P0_kENb11YSwgqgjFeG9RCc'
+    # Set the URL of your Symfony project (without trailing slash!) as value of the cors_origins directive
+    MERCURE_EXTRA_DIRECTIVES: |
+      cors_origins *
+      anonymous
+  pma: &pma-config
+    PMA_HOST: ${DB_HOST:-mariadb}
+    PMA_USER: ${DB_USER:-myhordes}
+    PMA_PASSWORD: ${DB_PASSWORD:-myh0rd3s}
+    PHP_UPLOAD_MAX_FILESIZE: 1G
+    PHP_MAX_INPUT_VARS: 1G
+
+services:
+  mariadb:
+    image: wodby/mariadb:${MARIADB_TAG:-11.2-3.28.2}
+    container_name: "${PROJECT_NAME}_mariadb"
+    stop_grace_period: "30s"
+    platform: linux/x86_64
+    environment: *mariadb-config
+    ports:
+      - '${DB_PORT:-3306}:3306'
+    profiles:
+      - all
+      - cli
+      - core
+      - myhordes
+      - data
+    volumes:
+      - ./mariadb-init:/docker-entrypoint-initdb.d
+      - ./mariadb-backup:/mnt/backups
+      - mariadb:/var/lib/mysql
+
+  php:
+    image: wodby/php:${PHP_TAG:-8.3-dev-4.49.0}
+    container_name: "${PROJECT_NAME}_php"
+    depends_on:
+      - mariadb
+      - redis
+    environment: *php-fpm-config
+    profiles:
+      - all
+      - cli
+      - core
+      - myhordes
+    volumes:
+      - ./myhordes:/var/www/myhordes
+      - ./.git:/var/www/.git
+      - ./composer-auth:/home/wodby/.composer
+
+  worker:
+    image: wodby/php:${PHP_TAG:-8.3-dev-4.49.0}
+    container_name: "${PROJECT_NAME}_worker"
+    depends_on:
+      - mariadb
+    environment: *php-common-config
+    command: bash /var/www/shell/worker.sh
+    profiles:
+      - all
+      - async
+      - myhordes
+    volumes:
+      - ./myhordes:/var/www/myhordes
+      - ./docker/shell:/var/www/shell
+
+  crond:
+    build:
+      context: ./docker/images/php-crond
+      args:
+        PHP_TAG: ${PHP_TAG:-8.3-dev-4.49.0}
+        CRON: "*/1      *       *       *       *       cd /var/www/myhordes && php bin/console schedule:run"
+    container_name: "${PROJECT_NAME}_crond"
+    depends_on:
+      - mariadb
+    environment: *php-common-config
+    command: sudo -E crond -f -d 0
+    profiles:
+      - all
+      - async
+      - myhordes
+    volumes:
+      - ./myhordes:/var/www/myhordes
+
+  redis:
+    container_name: "${PROJECT_NAME}_redis"
+    image: wodby/redis:${REDIS_TAG:-7-4.4.2}
+    environment: *redis-config
+    profiles:
+      - all
+      - cli
+      - core
+      - myhordes
+
+  apache:
+    image: wodby/apache:${APACHE_TAG:-2.4-4.13.1}
+    container_name: "${PROJECT_NAME}_apache"
+    depends_on:
+    - php
+    environment: *apache-config
+    profiles:
+      - all
+      - core
+      - myhordes
+    volumes:
+    - ./myhordes:/var/www/myhordes
+
+    ports:
+    - "8081:80"
+    labels:
+    - "traefik.http.routers.${PROJECT_NAME}_apache.rule=Host(`${PROJECT_NAME}.${BASE_FQDN}`)"
+
+  mailhog:
+    image: mailhog/mailhog
+    container_name: "${PROJECT_NAME}_mailhog"
+    profiles:
+      - all
+      - dev
+    labels:
+      - "traefik.http.services.${PROJECT_NAME}_mailhog.loadbalancer.server.port=8025"
+      - "traefik.http.routers.${PROJECT_NAME}_mailhog.rule=Host(`mailhog.${PROJECT_NAME}.${BASE_FQDN}`)"
+
+  pma:
+    image: phpmyadmin/phpmyadmin
+    container_name: "${PROJECT_NAME}_pma"
+    environment: *pma-config
+    profiles:
+      - all
+      - dev
+    labels:
+    - "traefik.http.routers.${PROJECT_NAME}_pma.rule=Host(`pma.${PROJECT_NAME}.${BASE_FQDN}`)"
+
+  traefik:
+    image: traefik:v2.9
+    container_name: "${PROJECT_NAME}_traefik"
+    command: --api.insecure=true --providers.docker
+    ports:
+      - '${WEB_PORT}:80'
+      - '${TRAEFIK_PORT}:8080'
+    profiles:
+      - all
+      - core
+      - myhordes
+      - etwin
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  postgres:
+    image: wodby/postgres:${POSTGRES_TAG:-15-1.31.4}
+    container_name: "${PROJECT_NAME}_postgres"
+    stop_grace_period: 30s
+    environment: *postgres-config
+    ports:
+      - '5432:5432'
+    profiles:
+      - all
+      - etwin
+    volumes:
+    - ./postgres-init:/docker-entrypoint-initdb.d
+    - postgres:/var/lib/postgresql/data
+
+  eternaltwin:
+    build:
+      context: ./docker/images/eternaltwin
+      args:
+        RUST_TAG: ${RUST_TAG:-1.81.0}
+    container_name: "${PROJECT_NAME}_eternaltwin"
+    depends_on:
+      - postgres
+    profiles:
+      - all
+      - etwin
+      - data
+    labels:
+      - "traefik.http.routers.${PROJECT_NAME}_et.rule=Host(`et.${PROJECT_NAME}.${BASE_FQDN}`)"
+      - "traefik.http.services.${PROJECT_NAME}_et.loadbalancer.server.port=50320"
+
+  mercure:
+    image: dunglas/mercure:${MERCURE_TAG:-v0.15.11}
+    container_name: "${PROJECT_NAME}_mercure"
+    environment: *mercure-config
+    command: /usr/bin/caddy run --config /etc/caddy/Caddyfile.dev
+    profiles:
+      - all
+      - core
+      - myhordes
+    volumes:
+      - mercure_data:/data
+      - mercure_config:/config
+    labels:
+      - "traefik.http.routers.${PROJECT_NAME}_mercure.rule=Host(`${PROJECT_NAME}.${BASE_FQDN}`) && PathPrefix(`/.well-known/mercure`)"
+
+  uptime:
+    image: louislam/uptime-kuma:1
+    container_name: "${PROJECT_NAME}_uptime"
+    profiles:
+      - all
+      - dev
+    volumes:
+      - kuma:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    labels:
+      - "traefik.http.routers.${PROJECT_NAME}_uptime.rule=Host(`kuma.${PROJECT_NAME}.${BASE_FQDN}`)"
+
+  utils:
+    build:
+      context: ./docker/images/utils
+      args:
+        ALPINE_TAG: ${ALPINE_TAG:-3.21.3}
+    container_name: "${PROJECT_NAME}_utils"
+    environment:
+      CROWDIN_PROJECT_ID: $CROWDIN_PROJECT_ID
+      CROWDIN_API_TOKEN: $CROWDIN_API_TOKEN
+    profiles:
+      - never
+    volumes:
+      - ./myhordes:/workdir
+
+volumes:
+  mariadb:
+  postgres:
+  mercure_data:
+  mercure_config:
+  kuma:
