@@ -1,12 +1,4 @@
 <?php
-
-$town_id = $_GET['id'] ?? null;
-if (!$town_id) {
-    echo "URL attendue : http://localhost:8081/_carte.php?id=xx";
-    exit;
-}
-
-// ================= CONFIG BDD =================
 $pdo = new PDO(
     'mysql:host=mariadb;dbname=myhordes;charset=utf8',
     'root',
@@ -14,156 +6,195 @@ $pdo = new PDO(
     [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]
 );
 
-/*
-|--------------------------------------------------------------------------
-| 1. Vérifie si zone_perso existe
-|--------------------------------------------------------------------------
-*/
-$exists = $pdo->query("
-    SELECT COUNT(*) 
-    FROM information_schema.tables 
-    WHERE table_schema = DATABASE()
-      AND table_name = 'zone_perso'
-")->fetchColumn();
-
-/*
-|--------------------------------------------------------------------------
-| 2. Création si inexistante
-|--------------------------------------------------------------------------
-*/
-if (!$exists) {
-
-    $pdo->exec("
-        CREATE TABLE zone_perso (
-            id INT NOT NULL,
-            town_id INT NOT NULL,
-            day_update INT NOT NULL DEFAULT 0,
-            regen TINYINT(1) NOT NULL DEFAULT 1,
-            ruin_regen TINYINT(1) NOT NULL DEFAULT 1,
-            position TINYINT NOT NULL,
-            PRIMARY KEY (id)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8
-    ");
-
-    $pdo->exec("
-        INSERT INTO zone_perso (id, town_id, day_update, regen, ruin_regen, position)
-        SELECT
-            z.id,
-            z.town_id,
-            0,
-            1,
-            1,
-            CASE
-                WHEN (ABS(z.x) + ABS(z.y) <= 3 AND ABS(z.x) < 3 AND ABS(z.y) < 3) THEN 5
-                WHEN (z.y >= 0 AND ABS(z.x) <= FLOOR(z.y / 2)) THEN 2
-                WHEN (z.y <= 0 AND ABS(z.x) <= FLOOR(-z.y / 2)) THEN 8
-                WHEN (z.x <= 0 AND ABS(z.y) <= FLOOR(-z.x / 2)) THEN 4
-                WHEN (z.x >= 0 AND ABS(z.y) <= FLOOR(z.x / 2)) THEN 6
-                WHEN (z.x > 0 AND z.y > 0) THEN 3
-                WHEN (z.x < 0 AND z.y > 0) THEN 1
-                WHEN (z.x > 0 AND z.y < 0) THEN 9
-                WHEN (z.x < 0 AND z.y < 0) THEN 7
-            END
-        FROM zone z
-    ");
-
-} else {
-    if (!True){
-        /*
-        |--------------------------------------------------------------------------
-        | 3. Suppression des zones orphelines
-        |--------------------------------------------------------------------------
-        */
-        $pdo->exec("
-            DELETE zp
-            FROM zone_perso zp
-            LEFT JOIN zone z ON z.id = zp.id
-            WHERE z.id IS NULL
-        ");
-
-        /*
-        |--------------------------------------------------------------------------
-        | 4. Ajout des nouvelles zones
-        |--------------------------------------------------------------------------
-        */
-        $pdo->exec("
-            INSERT INTO zone_perso (id, town_id, day_update, regen, ruin_regen, position)
-            SELECT
-                z.id,
-                z.town_id,
-                0,
-                1,
-                1,
-                CASE
-                    WHEN (ABS(z.x) + ABS(z.y) <= 3 AND ABS(z.x) < 3 AND ABS(z.y) < 3) THEN 5
-                    WHEN (z.y >= 0 AND ABS(z.x) <= FLOOR(z.y / 2)) THEN 2
-                    WHEN (z.y <= 0 AND ABS(z.x) <= FLOOR(-z.y / 2)) THEN 8
-                    WHEN (z.x <= 0 AND ABS(z.y) <= FLOOR(-z.x / 2)) THEN 4
-                    WHEN (z.x >= 0 AND ABS(z.y) <= FLOOR(z.x / 2)) THEN 6
-                    WHEN (z.x > 0 AND z.y > 0) THEN 3
-                    WHEN (z.x < 0 AND z.y > 0) THEN 1
-                    WHEN (z.x > 0 AND z.y < 0) THEN 9
-                    WHEN (z.x < 0 AND z.y < 0) THEN 7
-                END
-            FROM zone z
-            LEFT JOIN zone_perso zp ON zp.id = z.id
-            WHERE zp.id IS NULL
-        ");
-    }
+$town_id = $_GET['id'] ?? null;
+if (!$town_id) {
+    echo "URL attendue : http://localhost:8081/_perso_citoyens.php?id=xx";
+    exit;
 }
 
+// On actualise les inventaires 
 
-/**
- * 1. Récupération du jour actuel de la ville
- */
+$cache_done = (int)($_GET['cache_done'] ?? 0);
+if ($town_id && !$cache_done) {
+    #header("Location: _refresh_town_cache.php?id={$town_id}");
+    #exit;
+}
+
+/* ==========================
+   IDS DES CITOYENS
+   ========================== */
+$userStmt = $pdo->prepare("SELECT user_id FROM citizen WHERE town_id = ? AND alive = 1");
+$userStmt->execute([$town_id]);
+$user_ids = $userStmt->fetchAll(PDO::FETCH_COLUMN);
+sort($user_ids, SORT_NUMERIC);
+
+/* ==========================
+   REQUÊTES
+   ========================== */
+$nameStmt = $pdo->prepare("SELECT name FROM user WHERE id = ?");
+
+$citizenInfoStmt = $pdo->prepare("
+    SELECT ap, sp, bp, banished, camping_counter, profession_id
+    FROM citizen
+    WHERE user_id = ?
+    AND town_id = ?
+    AND alive = 1
+");
+
+$itemStmt = $pdo->prepare("
+    SELECT ip.name
+    FROM citizen c
+    JOIN item it ON it.inventory_id = c.inventory_id
+    JOIN item_prototype ip ON ip.id = it.prototype_id
+    WHERE c.user_id = ?
+    AND town_id = ?
+    AND c.alive = 1
+    ORDER BY ip.id
+");
+
+$propertiesStmt = $pdo->prepare("
+    SELECT properties_id 
+    FROM citizen 
+    WHERE user_id = ? 
+    AND town_id = ?
+    AND alive = 1
+    LIMIT 1
+");
+
+$propsStmt = $pdo->prepare("
+    SELECT props 
+    FROM citizen_properties 
+    WHERE id = ? 
+    LIMIT 1
+");
+
+
+$citizenHomeStmt = $pdo->prepare("
+    SELECT chest_id, prototype_id, additional_defense, additional_storage, temporary_defense
+    FROM citizen_home
+    WHERE id = ?
+");
+
+$homeUpgradesStmt = $pdo->prepare("
+    SELECT prototype_id, level
+    FROM citizen_home_upgrade
+    WHERE home_id = ?
+");
+
+$chestItemsStmt = $pdo->prepare("
+    SELECT ip.name
+    FROM item it
+    JOIN item_prototype ip ON ip.id = it.prototype_id
+    WHERE it.inventory_id = ?
+    ORDER BY ip.id
+");
+
+$posStmt = $pdo->prepare("
+    SELECT id, zone_id
+    FROM citizen
+    WHERE user_id = ?
+    AND town_id = ?
+    AND alive = 1
+");
+
+$heroicStmt = $pdo->prepare("
+    SELECT heroic_action_prototype_id 
+    FROM citizen_heroic_action_prototype 
+    WHERE heroic_action_prototype_id < 11 
+    AND citizen_id = ?
+");
+
+$digStmt = $pdo->prepare("
+    SELECT timestamp
+    FROM dig_timer
+    WHERE zone_id=?
+    AND passive=0
+    AND citizen_id=?
+");
+
+$zoneStmt = $pdo->prepare("
+    SELECT x, y, digs 
+    FROM zone
+    WHERE id = ?
+");
 
 $stmt = $pdo->prepare("SELECT day FROM town WHERE id = ?");
 $stmt->execute([$town_id]);
 $currentDay = (int)$stmt->fetchColumn();
 
-/**
- * 2. Récupération des zones visitées aujourd’hui (discovery_status = 2)
- */
-$stmt = $pdo->prepare("
-    SELECT id, digs, ruin_digs
-    FROM zone
-    WHERE town_id = ?
-    AND discovery_status = 2
-");
-$stmt->execute([$town_id]);
-$zones = $stmt->fetchAll();
+/* ==========================
+   SUPER MAP
+   ========================== */
+$skillMap = [
+    25 => 'S1', 26 => 'S2', 27 => 'S3', 28 => 'S4',
+    29 => 'U1', 30 => 'U2', 31 => 'U3', 32 => 'U4',
+    33 => 'P1', 34 => 'P2', 35 => 'P3', 36 => 'P4',
+    37 => 'E1', 38 => 'E2', 39 => 'E3', 40 => 'E4',
+    41 => 'R1', 42 => 'R2', 43 => 'R3', 44 => 'R4',
+];
 
-/**
- * 3. Préparation et exécution de la requête UPDATE
- */
-$update = $pdo->prepare("
-    UPDATE zone_perso
-    SET
-        day_update = :day_update,
-        regen = CASE
-            WHEN :digs = 0 THEN 0
-            ELSE regen
-        END,
-        ruin_regen = CASE
-            WHEN :ruin_digs = 0 THEN 0
-            ELSE 1
-        END
-    WHERE id = :zone_id
-      AND town_id = :town_id
-");
+/* ==========================
+   MAP user_id -> citizen.id
+   ========================== */
+$citizenIdByUser = [];
 
+if (!empty($user_ids)) {
+    $placeholders = implode(',', array_fill(0, count($user_ids), '?'));
 
-foreach ($zones as $zone) {
-    $update->execute([
-        ':day_update' => $currentDay,
-        ':digs'       => $zone['digs'],
-        ':ruin_digs'  => $zone['ruin_digs'],
-        ':zone_id'    => $zone['id'],
-        ':town_id'    => $town_id,
-    ]);
+    $stmt = $pdo->prepare("
+        SELECT id, user_id
+        FROM citizen
+        WHERE user_id IN ($placeholders)
+        AND alive = 1
+    ");
+    $stmt->execute($user_ids);
+
+    while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+        $citizenIdByUser[(int)$row['user_id']] = (int)$row['id'];
+    }
 }
 
-// ================= IMAGES DES OBJETS =================
+/* ==========================
+   STATUS DES CITOYENS
+   ========================== */
+$citizenStatuses = [];
+
+$citizenIds = array_values($citizenIdByUser);
+
+if (!empty($citizenIds)) {
+    $placeholders = implode(',', array_fill(0, count($citizenIds), '?'));
+
+    $Statutstmt = $pdo->prepare("
+        SELECT ccs.citizen_id, cs.name
+        FROM citizen_citizen_status ccs
+        JOIN citizen_status cs ON cs.id = ccs.citizen_status_id
+        WHERE cs.hidden = 0
+        AND ccs.citizen_id IN ($placeholders)
+    ");
+
+    $Statutstmt->execute($citizenIds);
+
+    while ($row = $Statutstmt->fetch(PDO::FETCH_ASSOC)) {
+        $citizenStatuses[(int)$row['citizen_id']][] = $row['name'];
+    }
+}
+
+
+/* ==========================
+   ITEMS
+   ========================== */
+$capacityBonusItems = [
+    'cart' => 3,
+    'bag' => 2,
+    'bagxl' => 3,
+    'pocket_belt' => 2,
+];
+
+$ignoredItems = ['shoe', 'bike', 'basic_suit', 'basic_suit_dirt', 'shaman', 'shield', 'tamed_pet', 'tamed_pet_drug', 'tamed_pet_off', 'vest_off', 'vest_on', 'keymol', 'pelle', 'surv_book'];
+
+/* ==========================
+   IMAGES ITEMS
+   ========================== */
 $itemImages = [];
 foreach (glob(__DIR__ . "/build/images/item/item_*.gif") as $file) {
     if (preg_match('/item_(.+?)\.[0-9a-f]+\.gif$/', basename($file), $m)) {
@@ -171,538 +202,426 @@ foreach (glob(__DIR__ . "/build/images/item/item_*.gif") as $file) {
     }
 }
 
-// Garder uniquement le nom logique (sans _#xx)
 function getItemImagePathFast($name, $map) {
     $key = preg_replace('/_#\d+$/', '', $name);
     return $map[$key] ?? null;
 }
 
-// ================= ZONES =================
-$sqlZones = $pdo->prepare('
-    SELECT id, floor_id, x, y, discovery_status, prototype_id
-    FROM zone
-    WHERE town_id = ?
-');
-$sqlZones->execute([$town_id]);
-$zones = $sqlZones->fetchAll(PDO::FETCH_ASSOC);
-
-// ================= REGEN PAR ZONE =================
-$sqlRegen = $pdo->prepare('
-    SELECT id, regen, ruin_regen, day_update
-    FROM zone_perso
-    WHERE town_id = ?
-');
-$sqlRegen->execute([$town_id]);
-
-$zonePerso = [];
-while ($r = $sqlRegen->fetch(PDO::FETCH_ASSOC)) {
-    $zonePerso[$r['id']] = $r;
-}
-
-// ================= Prototype des bâtiments =================
-$zoneProtoStmt = $pdo->query('SELECT id, label FROM zone_prototype');
-$zoneProtoMap = $zoneProtoStmt->fetchAll(PDO::FETCH_KEY_PAIR);
-
-// ================= Citoyens par zone =================
-$sqlCitizens = $pdo->prepare('
-    SELECT c.zone_id, GROUP_CONCAT(u.name) AS names
-    FROM citizen c
-    JOIN user u ON u.id = c.user_id
-    WHERE c.town_id = ?
-    GROUP BY c.zone_id
-');
-$sqlCitizens->execute([$town_id]);
-
-$citizensByZone = [];
-while ($c = $sqlCitizens->fetch(PDO::FETCH_ASSOC)) {
-    $citizensByZone[$c['zone_id']] = explode(',', $c['names']);
-}
-
-// Category objets
-$categoryLabels = [
-    1 => 'Ress',
-    2 => 'Déco',
-    3 => 'Arme',
-    4 => 'Cont',
-    5 => 'Défs',
-    6 => 'Drog',
-    7 => 'Food',
-    8 => 'Autr',
-];
-
-// ================= OBJETS PAR CASE =================
-
-// prototypes objets
-$protoMap = [];
-$protoStmt = $pdo->query('SELECT id, name, category_id, heavy FROM item_prototype order by id ASC');
-while ($row = $protoStmt->fetch(PDO::FETCH_ASSOC)) {$protoMap[$row['id']] = $row;}
-
-$map = [];
-$xs = [];
-$ys = [];
-
-// Récupérer tous les items d’un coup
-// Filtrer les zones où discovery_status > 0
-$discoveredZones = array_filter($zones, function($zone) {
-    return $zone['discovery_status'] > 0;
-});
-
-// Récupérer les floor_id de ces zones découvertes
-$zoneIds = array_column($discoveredZones, 'floor_id');
-
-if (!empty($zoneIds)) {
-    $in  = str_repeat('?,', count($zoneIds) - 1) . '?';
-    $sqlAllItems = $pdo->prepare("
-        SELECT inventory_id, prototype_id, broken
-        FROM item
-        WHERE inventory_id IN ($in)
-        AND prototype_id not in (271, 272, 273, 274)
-        ORDER BY prototype_id ASC
-    ");
-    $sqlAllItems->execute($zoneIds);
-    $itemsRaw = $sqlAllItems->fetchAll(PDO::FETCH_GROUP);
-} else {
-    // Aucun item si aucune zone découverte
-    $itemsRaw = [];
-}
-
-
-
-// ================= RÉCAP GLOBAL DES OBJETS (PAR CATÉGORIE / OBJET) =================
-
-$itemSummary = [];
-
-// Initialiser les catégories
-foreach ($categoryLabels as $catId => $label) {
-    $itemSummary[$catId] = [];
-}
-
-// Parcourir tous les objets de toutes les zones
-foreach ($itemsRaw as $inventoryId => $items) {
-    foreach ($items as $item) {
-
-        $protoId = (int)$item['prototype_id'];
-        $broken  = (int)$item['broken'];
-
-        if (!isset($protoMap[$protoId])) {
-            continue;
-        }
-
-        $proto = $protoMap[$protoId];
-        $catId = (int)$proto['category_id'];
-        $name  = $proto['name'];
-
-        // Clé unique par objet + état
-        $key = $protoId . '_' . $broken;
-
-        if (!isset($itemSummary[$catId][$key])) {
-            $itemSummary[$catId][$key] = [
-                'prototype_id' => $protoId, // <-- OBLIGATOIRE
-                'name'   => $name,
-                'broken' => $broken,
-                'count'  => 0
-            ];
-        }
-
-        $itemSummary[$catId][$key]['count']++;
+/* ==========================
+   IMAGES MAISONS & UPGRADES
+   ========================== */
+$homeImages = [];
+foreach (glob(__DIR__ . "/build/images/home/*.gif") as $file) {
+    if (preg_match('/([^\/]+)\.[0-9a-f]+\.gif$/', basename($file), $m)) {
+        $homeImages[$m[1]] = str_replace(__DIR__, '', $file);
     }
 }
 
-// Mouse-over des bâtiments dans le récap
-$dropStmt = $pdo->query("SELECT
-    zp.id AS zone_proto_id,
-    ip.icon AS resource_name,
-    ROUND(
-        ige.chance / SUM(ige.chance) OVER (PARTITION BY zp.id) * 100,
-        2
-    ) AS percentage
-    FROM zone_prototype zp
-    LEFT JOIN item_group ig ON zp.drops_id = ig.id
-    LEFT JOIN item_group_entry ige ON ige.item_group_id = ig.id
-    LEFT JOIN item_prototype ip ON ige.prototype_id = ip.id
-    ORDER BY zp.id, percentage DESC");
-$dropsByProto = [];
-
-while ($row = $dropStmt->fetch(PDO::FETCH_ASSOC)) {
-    if (!$row['resource_name']) continue;
-
-    $dropsByProto[$row['zone_proto_id']][] = [
-        'name' => $row['resource_name'],
-        'pct'  => $row['percentage']
-    ];
+function getHomeImage($key, $map) {
+    return $map[$key] ?? null;
 }
 
-
-// ================= Récapitulatif bâtiments (droite) =================
-
-$sqlRecap = $pdo->prepare('
-    SELECT
-        z.x,
-        z.y,
-        z.explorable_floors,
-        z.bury_count,
-        z.prototype_id,
-        zp.ruin_regen
-    FROM zone z
-    LEFT JOIN zone_perso zp ON zp.id = z.id
-    WHERE z.town_id = ?
-      AND z.discovery_status > 0
-      AND z.prototype_id IS NOT NULL
-');
-$sqlRecap->execute([$town_id]);
-$zonesRecap = $sqlRecap->fetchAll(PDO::FETCH_ASSOC);
-
-
-$buildingsRecap = ['near'=>[], 'far'=>[], 'multi'=>[]];
-
-foreach ($zonesRecap as $z) {
-    $distance = (int) round(sqrt($z['x']*$z['x'] + $z['y']*$z['y']));
-
-    $drops = [];
-    foreach ($dropsByProto[$z['prototype_id']] ?? [] as $d) {
-        $imgPath = getItemImagePathFast($d['name'], $itemImages);
-        if ($imgPath) {
-            $drops[] = [
-                'img' => $imgPath,
-                'pct' => $d['pct']
-            ];
-        }
-    }
-
-    $b = [
-        'name' => tr($zoneProtoMap[$z['prototype_id']]),
-        'x' => $z['x'],
-        'y' => $z['y'],
-        'distance' => $distance,
-        'full' => ($z['ruin_regen'] > 0),
-        'bury' => (int)$z['bury_count'],
-        'drops' => $drops
-    ];
-
-    if ($z['explorable_floors'] > 1) {
-        $buildingsRecap['multi'][] = $b;
-    } elseif ($distance < 10) {
-        $buildingsRecap['near'][] = $b;
-    } else {
-        $buildingsRecap['far'][] = $b;
-    }
-}
-
-// ================= Construire la carte (gauche) =================
-$map = [];
-$xs = [];
-$ys = [];
-
-foreach ($zones as $z) {
-    $zoneId  = (int)$z['id'];
-    $floorId = (int)$z['floor_id'];
-    $x       = (int)$z['x'];
-    $y       = (int)$z['y'];
-
-    $perso = $zonePerso[$zoneId] ?? [];
-
-    $regen = (int)($perso['regen'] ?? 0);
-
-    $cell = [
-        'zone_id'      => $zoneId,
-        'x'            => $x,
-        'y'            => $y,
-        'discovery'    => (int)$z['discovery_status'],
-        'items'        => [],
-        'regen'        => $regen,
-        'prototype_id' => $z['prototype_id'],
-        'ruin_regen'   => (int)($perso['ruin_regen'] ?? 0),
-        'day_update'   => $perso['day_update'] ?? null,
-        'citizens'     => $citizensByZone[$zoneId] ?? [],
-    ];
-
-    if ($cell['discovery'] !== 0 && isset($itemsRaw[$floorId])) {
-        foreach ($itemsRaw[$floorId] as $row) {
-            $pid    = (int)$row['prototype_id'];
-            $broken = (int)$row['broken'];
-
-            if (!isset($protoMap[$pid])) continue;
-
-            $proto = $protoMap[$pid];
-            $cat   = (int)$proto['category_id'];
-            $name  = $proto['name'];
-
-            if (!isset($cell['items'][$cat][$name])) {
-                $cell['items'][$cat][$name] = [
-                    'ok' => 0,
-                    'broken' => 0,
-                    'heavy' => !empty($proto['heavy']) ? 1 : 0,  // <-- ajouté
-                ];
-            }
-
-
-            if ($broken) {
-                $cell['items'][$cat][$name]['broken']++;
-            } else {
-                $cell['items'][$cat][$name]['ok']++;
-            }
-        }
-    }
-
-    $map[$y][$x] = $cell;
-    $xs[] = $x;
-    $ys[] = $y;
-}
-
-$minX = min($xs);
-$maxX = max($xs);
-$minY = min($ys);
-$maxY = max($ys);
-
-// Bouton pour mettre à jour la regen
-if (isset($_GET['maj_regen'])) {
-
-    // 2️⃣ Récupérer la direction du vent pour ce jour
-    $stmtWind = $pdo->prepare("SELECT wind_direction FROM gazette WHERE town_id = ? AND day = ?");
-    $stmtWind->execute([$town_id, $currentDay]);
-    $windDirection = (int)$stmtWind->fetchColumn();
-
-    // 3️⃣ Mettre à jour zone_perso : +1 à regen si position = wind_direction
-    $stmtUpdate = $pdo->prepare("
-        UPDATE zone_perso
-        SET regen = regen + 1, day_update = :day_update
-        WHERE town_id = :town_id
-          AND position = :wind_direction
-    ");
-    $stmtUpdate->execute([
-        ':day_update'    => $currentDay,
-        ':town_id'       => $town_id,
-        ':wind_direction'=> $windDirection
-    ]);
-
-    // Rediriger pour éviter le re-post
-    header("Location: ?id={$town_id}");
-    exit;
-}
-
-// Traduction des bâtiments
-function tr(string $key): string {
-    static $tr = null;
-
-    if ($tr === null) {
-        $tr = require __DIR__ . '/translations_game_fr.php';
-    }
-
-    return $tr[$key] ?? $key;
-}
-
-// Noter tous les x/y qui ont des citoyens 
-$stmt = $pdo->prepare("SELECT z.x, z.y FROM citizen c JOIN zone z ON z.id = c.zone_id WHERE c.town_id = ?");
-$stmt->execute([$town_id]);
-$citizens = array_map(function($r){ return ['x'=>(int)$r['x'], 'y'=>(int)$r['y']]; }, $stmt->fetchAll(PDO::FETCH_ASSOC));
-
-// Tableau des expéditions 
-$expeditions = [];
-$stmt = $pdo->prepare("
-    SELECT id, length, data, label
-    FROM expedition_route
-    WHERE owner_id IN (
-        SELECT id FROM citizen WHERE town_id = ?
-    )
-    ORDER BY label ASC
-");
-$stmt->execute([$town_id]);
-
-while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
-    $expeditions[] = [
-        'id'     => (int)$row['id'],
-        'label'  => $row['label'],
-        'length' => (int)$row['length'],
-        'path'   => json_decode($row['data'], true)
-    ];
-}
-
-// -------------------------------------------------- COLONNE DU RECAP DES VENTS 
-$winds = [];
-
-$stmt = $pdo->prepare("
-    SELECT day, wind_direction 
-    FROM gazette 
-    WHERE town_id = ?
-    AND wind_direction != 0
-    ORDER BY day ASC
-");
-$stmt->execute([$town_id]);
-
-while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
-    $winds[(int)$row['day']] = (int)$row['wind_direction'];
-}
-
-/* Mapping direction -> flèche */
-$windArrows = [
-    1 => 'N-O',
-    2 => ' N ',
-    3 => 'N-E',
-    4 => ' O ',
-    5 => ' / ',
-    6 => ' E ',
-    7 => 'S-O',
-    8 => ' S ',
-    9 => 'S-E'
+/* MAP upgrades -> image key */
+$homeUpgradeMap = [
+    1 => 'curtain',
+    2 => 'lab',
+    3 => 'kitchen',
+    4 => 'alarm',
+    5 => 'rest',
+    6 => 'lock',
+    7 => 'fence',
+    8 => 'chest',
+    9 => 'defense',
 ];
 
 
+/* ==========================
+   IMAGES ICONS (AP / SP / BP / HUMAN / BANISHED)
+   ========================== */
+$iconImages = [];
+foreach (glob(__DIR__ . "/build/images/icons/*.gif") as $file) {
+    if (preg_match('/([^\/]+)\.[0-9a-f]+\.gif$/', basename($file), $m)) {
+        $iconImages[$m[1]] = str_replace(__DIR__, '', $file);
+    }
+}
 
-// =====================================================================================================================================================================================
-// HTML
-// =====================================================================================================================================================================================
+function getIconPath($key, $map) {
+    return $map[$key] ?? null;
+}
+
+/* ==========================
+   IMAGES CAMPING
+   ========================== */
+$campImages = [];
+foreach (glob(__DIR__ . "/build/images/pictos/*.gif") as $file) {
+    if (preg_match('/([^\/]+)\.[0-9a-f]+\.gif$/', basename($file), $m)) {
+        $campImages[$m[1]] = str_replace(__DIR__, '', $file);
+    }
+}
+
+function getCampPath($key, $map) {
+    return $map[$key] ?? null;
+}
+
+/* ==========================
+   IMAGES STATUS
+   ========================== */
+$statusImages = [];
+foreach (glob(__DIR__ . "/build/images/status/status_*.gif") as $file) {
+    if (preg_match('/status_(.+?)\.[0-9a-f]+\.gif$/', basename($file), $m)) {
+        $statusImages[$m[1]] = str_replace(__DIR__, '', $file);
+    }
+}
+
+function getStatusImagePath($name, $map) {
+    return $map[$name] ?? null;
+}
+
+
+/* Habitations fortifiées construites */
+$stmt = $pdo->prepare("select complete from building where town_id=? and prototype_id=78;");
+$stmt->execute([$town_id]);
+$hf_construite = $stmt->fetch(PDO::FETCH_ASSOC);
+
+/* ==========================
+   CALCUL DE LA DEFENSE HABITATION
+   ========================== */
+function computeHomeDefense($home, $upgrades, $hf_construite, $profession) {
+    $def = (int)$home['additional_defense']
+         + (int)$home['temporary_defense']
+         + pow($home['prototype_id'] - 1, 2);
+
+    /* Renfort (prototype 7) */
+    if (isset($upgrades[9])) {
+        $lvl = $upgrades[9];
+        $map = [1=>1,2=>2,3=>3,4=>4,5=>5,6=>6,7=>8,8=>10,9=>12,10=>14];
+        $def += $map[$lvl] ?? 0;
+    }
+
+    if (isset($upgrades[7])) {
+        $def += 3;
+    }
+
+    if (!empty($hf_construite['complete'])) {
+        $def += 4;
+    }
+
+    $def += match ($profession) {
+        1, 2 => 0,
+        4    => 3,
+        default => 2,
+    };
+
+    return $def;
+}
+
+/* ==========================
+   CALCUL DE LA PLACE EN COFFRE
+   ========================== */
+function computeChestCapacity($super, $home, $upgrades) {
+    $cap = 4;
+
+    /* SUPER */
+    if (preg_match('/U[34]/', $super)) $cap += 1;
+    if (strpos($super, 'E1') !== false) $cap += 1;
+    if (strpos($super, 'E2') !== false) $cap += 2;
+    if (preg_match('/E[34]/', $super)) $cap += 3;
+
+    /* Storage bonus */
+    $cap += (int)$home['additional_storage'];
+
+    /* Chest upgrade (prototype 8) */
+    if (isset($upgrades[8])) {
+        $cap += (int)$upgrades[8];
+    }
+
+    return $cap;
+}
 
 ?>
 
 <!DOCTYPE html>
-<html lang="fr">
+<html>
 <head>
 <meta charset="UTF-8">
-<title>Carte : <?= htmlspecialchars($town_id) ?></title>
-
+<title>Citoyens : <?= htmlspecialchars($town_id) ?></title>
 <style>
-body {background:#FFF;font-family:Arial;}
-/* GLOBAL GRID */
-.map-container {display:grid;grid-template-columns: 30px auto 30px;grid-template-rows: auto auto auto;width: fit-content;}
-/* MAP */
-.map {display:grid;grid-auto-rows:30px;}
-.cell {width:30px;height:30px;border:0.5px solid #333;background:#2e2e2e;position:relative;}
-.city { background:#000; }
-.cell:hover {outline:1px solid #777;z-index:5;}
-/* TOOLTIP */
-.tooltip {display:none;position:absolute;top:32px;left:0;background:#fff;border:1px solid #555;padding:5px;font-size:12px;white-space:nowrap;z-index: 1000;}
-.cell:hover .tooltip { display:block; }
-/* ITEMS */
-.item-count {position:absolute;bottom:1px;right:3px;font-size:11px;font-weight:bold;pointer-events:none;}
-/* REGEN */
-.cell.regen-0 { background:#ff9900; }
-.cell.regen-1 { background:#b6d7a8; }
-.cell.regen-2 { background:#a4c2f4; }
-.cell.regen-3 { background:#d5a6bd; }
-.cell.regen-4 { background:#ad7b71; }
-/* COORDS */
-.coords-x,.coords-y {background:#000;}
-.coords-x { display:grid; }
-.coords-y { display:flex; flex-direction:column; }
-.coord {width:30px;height:30px;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:bold;color:#fff;background:#000;border:0.5px solid #222;box-sizing: border-box;}
-.layout {display: flex;align-items: flex-start;gap: 10px;}
-/* ======================================== RECAP BATIMENTS ======================================== */
-.sidebar {width: 260px;min-width: 260px;display: grid;grid-template-rows: auto auto;gap: 10px;}
-.map-wrapper {flex: 1;}
-.recap-grid {display: grid;grid-template-columns: repeat(3, 1fr);gap: 6px;width: 100%;}
-.recap-cell {border: 1px solid #333;padding: 3px;border-radius: 4px;background: #f9f9f9;width: 100%;box-sizing: border-box;}
-.building-line {display: grid;grid-template-columns: 1fr 50px 40px 50px 30px;gap: 6px;align-items: center;margin-bottom: 2px;font-size: 12px;width: 100%;box-sizing: border-box;white-space: nowrap;overflow: hidden;text-overflow: ellipsis;}
-.building-line {display: grid;grid-template-columns: 1fr 50px 40px 50px 30px;gap: 12px;align-items: center;margin-bottom: 2px;font-size: 12px;width: 100%;box-sizing: border-box;white-space: nowrap;overflow: hidden;text-overflow: ellipsis;}
-.building-line > div {display: flex;align-items: center;justify-content: flex-start;}
-.recap-cell b {display: block;text-align: center}
-.b-name, .b-coords, .b-distance, .b-full, .b-bury {text-align: left;}
-.b-full.empty {color: red;font-weight: bold;}
-.b-full.full {color: inherit;font-weight: normal;}
-/* ======================================== RECAP OBJETS ======================================== */
-.item-summary-full {width: 100%;}
-.item-summary-full .recap-cell {width: 100%;box-sizing: border-box;}
-.recap-objets-category-title {font-weight: bold;font-size: 14px;margin-bottom: 4px;}
-.recap-objets-list {display: flex;flex-wrap: wrap;gap: 4px;}
-.recap-objets-item {display: flex;flex-direction: row;align-items: center;font-size: 10px;text-align: center;background: #f5f5f5;border: 2px solid #ccc;border-radius: 4px;padding: 2px 4px;gap: 2px;cursor: pointer;}
-.recap-objets-item img {width: 18px;height: 18px;object-fit: contain;}
-/* Compteur à gauche de l’image */
-.recap-objets-count {font-weight: bold;font-size: 10px;}
-/* Objet cassé / broken */
-.recap-objets-item.broken {opacity: 0.6;text-decoration: line-through;}
-.recap-objets-category-title{padding-top:2px;}
-/* ======================================== DISTANCE PA ======================================== */
-.pa-border-top { position:absolute; top:0; left:0; right:0; height:2px; background:red; pointer-events:none; z-index:10; }
-.pa-border-bottom { position:absolute; bottom:0; left:0; right:0; height:2px; background:red; pointer-events:none; z-index:10; }
-.pa-border-left { position:absolute; top:0; bottom:0; left:0; width:2px; background:red; pointer-events:none; z-index:10; }
-.pa-border-right { position:absolute; top:0; bottom:0; right:0; width:2px; background:red; pointer-events:none; z-index:10; }
-/* ======================================== DISTANCE KM ======================================== */
-.km-border-top { position:absolute; top:0; left:0; right:0; height:3px; background:cyan; pointer-events:none; z-index:10; }
-.km-border-bottom { position:absolute; bottom:0; left:0; right:0; height:3px; background:cyan; pointer-events:none; z-index:10; }
-.km-border-left { position:absolute; top:0; bottom:0; left:0; width:3px; background:cyan; pointer-events:none; z-index:10; }
-.km-border-right { position:absolute; top:0; bottom:0; right:0; width:3px; background:cyan; pointer-events:none; z-index:10; }
-/* ======================================== Barres entre les distances ======================================== */
-.item {display: flex;align-items: center;gap: 5px;padding: 0 15px;}
-.item:not(:first-child) {border-left: 1px solid #ccc;}
-/* ======================================== DISTANCE SCRUT ======================================== */
-.scrut-border-top { position:absolute; top:0; left:0; right:0; height:1px; background:blue; pointer-events:none; z-index:10; }
-.scrut-border-bottom { position:absolute; bottom:0; left:0; right:0; height:1px; background:blue; pointer-events:none; z-index:10; }
-.scrut-border-left { position:absolute; top:0; bottom:0; left:0; width:1px; background:blue; pointer-events:none; z-index:10; }
-.scrut-border-right { position:absolute; top:0; bottom:0; right:0; width:1px; background:blue; pointer-events:none; z-index:10; }
-/* ======================================== DISTANCE BATIMENTS ======================================== */
-.building-border { position:absolute; top:0; left:0; right:0; bottom:0; border:2px solid black; pointer-events:none; z-index:15; box-sizing:border-box; }
-/* ======================================== DISTANCE CITOYENS ======================================== */
-.citizen-border { position:absolute; top:0; left:0; right:0; bottom:0; border:2px solid yellow; pointer-events:none; z-index:9; box-sizing:border-box; }
-/* ======================================== DISTANCE OBJETS ======================================== */
-.item-border { position:absolute; top:0; left:0; right:0; bottom:0; border:3px solid limegreen; pointer-events:none; z-index:17; box-sizing:border-box; }
-.recap-objets-item.active-object { border: 3px solid limegreen; }
-/* ======================================== DISTANCE ZOO ======================================== */
-.zoo-rectangle {position: absolute;border: 3px solid black;pointer-events: none;z-index: 50;}
-/* ======================================== MOUSE-OVER RECAP DES BATIMENTS ======================================== */
-#building-tooltip {position: absolute;display: none;background: #fff;color: #000;border: 1px solid #555;border-radius: 4px;padding: 6px 8px;font-size: 11px;z-index: 2000;pointer-events: none;white-space: nowrap;box-shadow: 0 2px 6px rgba(0,0,0,0.25);}
-.building-tooltip-line {display: flex;align-items: center;gap: 4px;margin-bottom: 2px;}
-.building-tooltip-line img {width: 16px;height: 16px;object-fit: contain;}
-/* ======================================== ENCAPSULEMENT DE LA MAP ET DES FILTRES ======================================== */
-.map-wrapper {display: flex;flex-direction: column;align-items: flex-start;width: fit-content;flex: 0 0 auto;}
-.map-filters {font-size: 14px;}
-.filters-line {display: flex;align-items: center;}
-/* ======================================== RECAP EXPEDITIONS ======================================== */
-.recap-expeditions {width: 100%;}
-.recap-expeditions .recap-cell {width: 100%;box-sizing: border-box;}
-.expeditions-grid {display: grid;grid-template-columns: repeat(4, 1fr);gap: 4px 6px;font-size: 11px;}
-.expedition-line {white-space: nowrap;}
-/* ======================================== EXPEDITIONS PATH ======================================== */
-.cell {position: relative;}
-.cell .exp-line {position: absolute;background: #000;pointer-events: none;z-index: 18;}
-.exp-h {height: 3px;top: 50%;transform: translateY(-50%);}
-.exp-v {width: 3px;left: 50%;transform: translateX(-50%);}
-/* ======================================== VENT COLUMN ======================================== */
-.wind-wrapper {width: 70px;min-width: unset;background: #f4f4f4;border: 1px solid #bbb;border-radius: 6px;padding: 6px;font-size: 12px;box-shadow: 0 2px 4px rgba(0,0,0,0.08);}
-.wind-title {text-align: center;font-weight: bold;margin-bottom: 6px;padding-bottom: 4px;border-bottom: 1px solid #ccc;}
-.wind-row {display: flex;justify-content: space-between;align-items: center;padding: 2px 0;}
-.wind-day {font-weight: bold;}
-.wind-arrow {font-size: 16px;}
-/* ======================================== WIND TABLE ======================================== */
-
-.wind-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 12px;
-}
-
-.wind-table th {
-    background: #e0e0e0;
-    border-bottom: 1px solid #bbb;
-    padding: 4px;
-    text-align: center;
-}
-
-.wind-table td {
-    padding: 1px;
-    text-align: center;
-    border-bottom: 1px solid #eee;
-}
-
-.wind-table tr:nth-child(even) {
-    background: #fafafa;
-}
-
-.wind-table tr:hover {
-    background: #ddd;
-}
+table { border-collapse: collapse; width: 100%; }
+td { border: 1px solid #ccc; padding: 6px; vertical-align: top; position: relative; }
+.user-block {display: flex;gap: 10px;width: 100%;height: 100%;position: relative;}
+.user-info {flex: 0 0 60%;display: flex;flex-direction: column;height: 100%;}
+.user-stats {flex: 0 0 40%;display: flex;flex-direction: column;position: relative;height: 100%;}
+.user-stats .camping {position: absolute;top: 2px;right: 2px;display: flex;align-items: center;font-size: 15px;margin-right: 10px;gap: 2px;}
+.inventory-line {display: flex;align-items: center;flex-wrap: nowrap;}
+.inventory {display: inline-grid;gap: 2px;}
+.inventory span {width: 18px;height: 18px;border: 1px solid #999;display: flex;align-items: center;justify-content: center;}
+.stats-line {font-size: 15px;display: flex;align-items: center;gap: 10px;min-height: 18px;}
+.status-line {margin-top: 2px;white-space: nowrap;min-height: 18px}
+.list-block {display: inline-block;margin-bottom: 12px;}
+.list-row {display: grid;grid-template-columns: 1fr 1fr;gap: 12px;}
+.list-header {font-weight: bold;margin-bottom: 6px;}
+.lists-container {display: flex;flex-wrap: wrap;gap: 12px;}
+.list {white-space: nowrap;}
+.list {padding-right:30px;}
 </style>
 </head>
-
 <body style="margin-top:0px;margin-bottom:0px;">
+<table>
+<tr>
+<?php
+$col = 0;
+$total_ap = 0;
+$total_cp = 0;
+foreach ($user_ids as $uid) {
+    if ($col === 4) { echo "</tr><tr>"; $col = 0; }
+
+    echo "<td>";
+
+    $nameStmt->execute([$uid]);
+    $name = $nameStmt->fetchColumn();
+
+    $citizenInfoStmt->execute([$uid, $town_id]);
+    $info = $citizenInfoStmt->fetch(PDO::FETCH_ASSOC);
+
+    $ap = (int)$info['ap'];
+    $total_ap += $ap;
+    $sp = (int)$info['sp'];
+    $bp = (int)$info['bp'];
+    $total_cp += $bp;
+    $banished = (int)$info['banished'];
+    $camping = (int)$info['camping_counter'];
+    $profession = (int)$info['profession_id'];
+
+    echo "<div class='user-block'>";
+
+    /* ================= LEFT ================= */
+    echo "<div class='user-info'>";
+
+    // LIGNE 1 : pseudo + super
+    $statusImg = $banished ? getIconPath('banished', $iconImages) : getIconPath('small_human', $iconImages);
+    echo "<div>";
+    if ($statusImg) echo "<img src='{$statusImg}' width='16' style='vertical-align:middle;margin-right:4px'>";
+    echo "<strong>" . htmlspecialchars($name) . "</strong>";
+
+    $super = '';
+    $propertiesStmt->execute([$uid, $town_id]);
+    $pid = $propertiesStmt->fetchColumn();
+    if ($pid) {
+        $propsStmt->execute([$pid]);
+        $props = json_decode($propsStmt->fetchColumn(), true);
+        if (!empty($props['skills']['list'])) {
+            foreach ($props['skills']['list'] as $sid) {
+                if (isset($skillMap[$sid])) $super .= $skillMap[$sid];
+            }
+        }
+    }
+    if ($super !== '') echo "<span style='font-size:11px;color:#555;margin-left:4px'>: {$super}</span>";
+    echo "</div>";
+
+    // LIGNE 2 : inventaire
+    $itemStmt->execute([$uid, $town_id]);
+    $items = $itemStmt->fetchAll(PDO::FETCH_ASSOC);
+
+    $capacity = 4;
+    if (preg_match('/E([1-4])/', $super, $m)) $capacity += [0,1,2,2,3][$m[1]];
+
+    $inventoryItems = [];
+    $extraCapacity = 0;
+
+    echo "<div class='inventory-line'>";
+    foreach ($items as $i => $item) {
+        $base = preg_replace('/_#\d+$/', '', $item['name']);
+        if (in_array($base, $ignoredItems, true)) {
+            $img = getItemImagePathFast($item['name'], $itemImages);
+            if ($img) echo "<img src='{$img}' width='16' style='margin-left:2px'>";
+            continue;
+        }
+        if (isset($capacityBonusItems[$base])) $extraCapacity += $capacityBonusItems[$base];
+        $inventoryItems[] = $item;
+    }
+
+    $total = $capacity + $extraCapacity;
+
+    echo "<div class='inventory' style='margin-left:4px;grid-template-columns:repeat({$total},18px)'>";
+    for ($i=0;$i<$total;$i++) {
+        echo "<span>";
+        if (isset($inventoryItems[$i])) {
+            $img = getItemImagePathFast($inventoryItems[$i]['name'], $itemImages);
+            if ($img) echo "<img src='{$img}' width='16'>";
+        }
+        echo "</span>";
+    }
+    echo "</div>";
+    echo "</div>";
+
+    // LIGNE 3 : maison + coffre
+    $citizenHomeStmt->execute([$citizenIdByUser[$uid]]);
+    $home = $citizenHomeStmt->fetch(PDO::FETCH_ASSOC);
+
+    if ($home) {
+        $homeUpgradesStmt->execute([$citizenIdByUser[$uid]]);
+        $upgradesRaw = $homeUpgradesStmt->fetchAll(PDO::FETCH_ASSOC);
+
+        $upgrades = [];
+        foreach ($upgradesRaw as $u) {
+            $upgrades[(int)$u['prototype_id']] = (int)$u['level'];
+        }
+
+        $defense = computeHomeDefense($home, $upgrades, $hf_construite, $profession);
+        $homeImgKey = 'home_lv' . ($home['prototype_id'] - 1);
+        $homeImg = getHomeImage($homeImgKey, $homeImages);
+
+        echo "<div style='margin-top:5px;display:flex;align-items:center;gap:6px'>";
+
+        // Maison + défense
+        if ($homeImg) echo "<img src='{$homeImg}' width='22'>";
+        echo "<strong>" . sprintf('%02d', $defense) . "</strong>";
+
+        // Coffre
+        $capacity = computeChestCapacity($super, $home, $upgrades);
+        $chestItemsStmt->execute([$home['chest_id']]);
+        $chestItems = $chestItemsStmt->fetchAll(PDO::FETCH_ASSOC);
+
+        echo "<div class='inventory' style='grid-template-columns:repeat({$capacity},18px)'>";
+        for ($i = 0; $i < $capacity; $i++) {
+            echo "<span>";
+            if (isset($chestItems[$i])) {
+                $name = $chestItems[$i]['name'];
+                $img = getItemImagePathFast($name, $itemImages);
+                if ($img) echo "<img src='{$img}' width='16'>";
+            }
+            echo "</span>";
+        }
+        echo "</div>";
+
+        echo "</div>"; // fin maison + coffre
+    }
+
+    /* ================= LIGNE 4 ================= */
+    // LEFT : actions héroïques
+    $cid = $citizenIdByUser[$uid] ?? null;
+    $heroicStmt->execute([$cid]);
+    $heroicsRaw = $heroicStmt->fetchAll(PDO::FETCH_COLUMN);
+
+    $heroicMap = [1=>'RDH',2=>'TA1',3=>'US',4=>'SS',5=>'VLM',6=>'VLM',7=>'TA2',8=>'TA3',9=>'TA4',10=>'Sauv'];
+    $adjustedHeroics = [];
+    foreach ($heroicsRaw as $hid) {
+        $nameHero = $heroicMap[$hid] ?? $hid;
+        if (preg_match('/U([1-4])/', $super, $m)) { $u=(int)$m[1]; if($hid===10)$nameHero.=" ({$u})"; }
+        if (preg_match('/E([1-4])/', $super, $m)) {
+            $e = (int)$m[1];
+            if ($hid === 3) {
+                $map = [1 => 2, 2 => 3, 3 => 4, 4 => 4];
+                $nameHero .= " ({$map[$e]})";
+            }
+
+            if ($hid === 4) {
+                $map = [1 => 22, 2 => 24, 3 => 44, 4 => 46];
+                $nameHero .= " ({$map[$e]})";
+            }
+        }
+        if (preg_match('/R([1-4])/', $super, $m)) { $r=(int)$m[1]; if($hid===1)$nameHero.=" (".(9+2*($r-1)).")"; }
+        $adjustedHeroics[] = $nameHero;
+    }
+
+    if (!empty($adjustedHeroics)) {
+        echo "<div style='margin-top:5px;font-size:13px;'>".implode(" / ", $adjustedHeroics)."</div>";
+    }
+
+    echo "</div>"; // FIN user-info LEFT
+
+    /* ================= RIGHT ================= */
+    echo "<div class='user-stats'>";
+
+    // PA / SP / BP
+    echo "<div class='stats-line'>";
+    if ($p=getIconPath('ap_small_fr',$iconImages)) echo "<img src='{$p}' width='14'> {$ap}";
+    if ($sp>0 && ($p=getIconPath('sp_small_fr',$iconImages))) echo "<span style='margin-left:10px'><img src='{$p}' width='14'> {$sp}</span>";
+    $hasKeymol = false;
+    foreach ($items as $item) { if ($item['name']==='keymol_#00') { $hasKeymol=true; break; } }
+    if ($hasKeymol && ($p=getIconPath('bp_small_fr',$iconImages))) echo "<span style='margin-left:10px'><img src='{$p}' width='14'> {$bp}</span>";
+    echo "</div>";
+
+    // Camping
+    if ($camping > 0 && ($campImg = getCampPath('r_camp', $campImages))) {
+        echo "<div class='camping'>{$camping}<img src='{$campImg}' width='14'></div>";
+    }
+
+    // Status
+    echo "<div class='status-line'>";
+    if ($cid && !empty($citizenStatuses[$cid])) {
+        foreach ($citizenStatuses[$cid] as $statusName) {
+            if (isset($statusImages[$statusName])) {
+                echo "<img src='{$statusImages[$statusName]}' width='16' style='margin-right:4px'>";
+            }
+        }
+    }
+    echo "</div>";
+
+    // Améliorations maison dans RIGHT (triées par prototype_id)
+    if ($home && !empty($upgrades)) {
+        ksort($upgrades); // Tri par prototype_id
+        echo "<div style='margin-top:3px;display:flex;flex-wrap:wrap;gap:4px'>";
+        foreach ($upgrades as $pid => $lvl) {
+            if ($lvl > 0 && isset($homeUpgradeMap[$pid])) {
+                $img = getHomeImage($homeUpgradeMap[$pid], $homeImages);
+                if ($img) echo "<span><img src='{$img}' width='16'> {$lvl}</span>";
+            }
+        }
+        echo "</div>";
+    }
+    else {echo "<div class='status-line'>&nbsp;</div>";}
+
+    // RIGHT : position + prochaine fouille
+    $posStmt->execute([$uid, $town_id]);
+    $pos = $posStmt->fetch(PDO::FETCH_ASSOC);
+
+    if (!$pos['zone_id']) {
+        echo "<div style='margin-top:5px;font-size:13px;'>En ville</div>";
+    } else {
+        $zoneStmt->execute([$pos['zone_id']]);
+        $zone = $zoneStmt->fetch(PDO::FETCH_ASSOC);
+
+        $digStmt->execute([$pos['zone_id'], $pos['id']]);
+        $digRaw = $digStmt->fetch(PDO::FETCH_COLUMN);
+
+        $digTime = $digRaw ? strtotime($digRaw) : null;
+
+        $distance = round(sqrt($zone['x'] * $zone['x'] + $zone['y'] * $zone['y']));
+        
+        $currentHour = (int)date('H');
+        
+        $danger = ($distance > 2 && (int)$zone['digs'] === 0);
+
+        $style = "margin-top:5px;font-size:13px;";
+        if ($danger) {
+            $style .= "color:red;font-weight:bold;";
+        }
+        // -----------------------
+
+        echo "<div style='{$style}'>";
+        echo "Pos: ({$zone['x']},{$zone['y']})";
+        if ($digTime) echo " / Fouille: ".date('H:i:s',$digTime);
+        echo "</div>";
+    }
+
+
+
+    echo "</div>"; // user-stats RIGHT
+    echo "</div>"; // user-block
+    echo "</td>";
+
+    $col++;
+}
+?>
+
 
 <div style="position: relative; padding: 8px 12px; display: flex; align-items: center; min-height: unset;">
 
     <!-- PARTIE GAUCHE -->
     <?php
-        $leftContent =
-            '<a href="?id=' . (int)$town_id . '&maj_regen=1"
-                style="padding:2px 10px; background:#4CAF50; color:#fff; text-decoration:none; border-radius:4px;">
-                MAJ Regen
-            </a>';    ?>
+        $leftContent = "PA restants : <strong>" . ($total_ap ?? 0) . "</strong> | PC restants : <strong>" . ($total_cp ?? 0) . "</strong>";
+    ?>
     <?php if (!empty($leftContent)) { ?>
         <div style="padding: 6px 12px;background: rgba(245,245,245,0.9);border-radius: 14px;border: 1px solid #b5b5b5;font-size: 13px;color: #333;box-shadow: 0 2px 5px rgba(0,0,0,0.08);margin-right: auto;white-space: nowrap;"><?= $leftContent ?></div>
     <?php } ?>
@@ -717,7 +636,7 @@ body {background:#FFF;font-family:Arial;}
 
     <!-- PARTIE DROITE -->
     <?php
-        $rightContent = '<strong>Affichage :</strong><label><input type="checkbox" id="filter-heavy">Encombrants</label><label><input type="checkbox" id="filter-light" checked>Légers</label>';
+        $rightContent = "";
     ?>
     <?php if (!empty($rightContent ?? '')) { ?>
         <div style="padding: 6px 12px;background: rgba(245,245,245,0.9);border-radius: 14px;border: 1px solid #b5b5b5;font-size: 13px;color: #333;box-shadow: 0 2px 5px rgba(0,0,0,0.08);margin-left: auto;white-space: nowrap;">
@@ -727,1006 +646,424 @@ body {background:#FFF;font-family:Arial;}
 
 </div>
 
-<div class="layout">
-    <!-- WIND COLUMN -->
-    <div class="wind-wrapper">
-        <div class="wind-title"></div>
 
-        <table class="wind-table">
-            <thead>
-                <tr>
-                    <th>J</th>
-                    <th></th>
-                </tr>
-            </thead>
-            <tbody>
-                <?php foreach ($winds as $day => $direction): ?>
-                    <tr>
-                        <td><strong><?= $day ?></strong></td>
-                        <td><?= $windArrows[$direction] ?? '' ?></td>
-                    </tr>
-                <?php endforeach; ?>
-            </tbody>
-        </table>
-    </div>
+</table>
 
-    <div class="map-wrapper">
-        <div class="map-container">
+<?php
 
-            <!-- Coord X Top -->
-            <div></div>
-            <div class="coords-x" style="grid-template-columns:repeat(<?= $maxX-$minX+1 ?>,30px)">
-                <?php for($x=$minX;$x<=$maxX;$x++): ?>
-                    <div class="coord"><?= $x ?></div>
-                <?php endfor; ?>
-            </div>
-            <div></div>
-
-            <!-- Coord Y Left + Map + Coord Y Right -->
-            <div class="coords-y">
-                <?php for($y=$maxY;$y>=$minY;$y--): ?>
-                    <div class="coord"><?= $y ?></div>
-                <?php endfor; ?>
-            </div>
-
-            <div class="map" style="grid-template-columns:repeat(<?= $maxX-$minX+1 ?>,30px)">
-            <?php for($y=$maxY;$y>=$minY;$y--): ?>
-                <?php for($x=$minX;$x<=$maxX;$x++):
-                    $cell = $map[$y][$x] ?? null;
-                    $isCity = ($x === 0 && $y === 0);
-
-                    $regenClass = '';
-                    if (!$isCity && $cell && $cell['discovery'] !== 0) {
-                        $r = $cell['regen'];
-                        $regenClass = 'regen-' . ($r >= 4 ? 4 : $r);
-                    }
-
-                    $dataAttrs = '';
-                    if ($cell) {
-                        $dataAttrs = 'data-x="'. $x .'" '
-                            . 'data-y="'. $y .'" '
-                            . 'data-items="'. htmlspecialchars(json_encode(
-                                array_map(function($itemsByName) use ($itemImages, $protoMap) {
-                                    $out = [];
-                                    foreach ($itemsByName as $name => $counts) {
-                                        $path = getItemImagePathFast($name, $itemImages);
-
-                                        $protoId = $counts['prototype_id'] ?? null;
-                                        $isHeavy = ($protoId && !empty($protoMap[$protoId]['heavy'])) ? 1 : 0;
-
-                                        $out[$path ?: $name] = [
-                                            'ok'     => (int)($counts['ok'] ?? 0),
-                                            'broken' => (int)($counts['broken'] ?? 0),
-                                            'heavy'  => $isHeavy
-                                        ];
-                                    }
-                                    return $out;
-                                }, $cell['items'])
-                            )) .'" '
-                            . 'data-citizens="'. htmlspecialchars(json_encode($cell['citizens'])) .'" '
-                            . 'data-prototype="'. htmlspecialchars(
-                                (!empty($cell['prototype_id']) && isset($zoneProtoMap[$cell['prototype_id']]))
-                                    ? tr($zoneProtoMap[$cell['prototype_id']])
-                                    : ''
-                            ) .'" '
-                            . 'data-day_update="'. htmlspecialchars($cell['day_update'] ?? '') .'" '
-                            . 'data-ruin_regen="'. htmlspecialchars($cell['ruin_regen'] ?? '') .'" '
-                            . 'data-discovery="'. ($cell['discovery'] ?? 0) .'"';
-                    }
-
-                $heavyTotal = 0;
-                $lightTotal = 0;
-
-                if ($cell && $cell['discovery'] !== 0) {
-                    foreach ($cell['items'] as $itemsByCat) {
-                        foreach ($itemsByCat as $item) {
-                            $qty = ($item['ok'] ?? 0) + ($item['broken'] ?? 0);
-                            if (!empty($item['heavy'])) {
-                                $heavyTotal += $qty;
-                            } else {
-                                $lightTotal += $qty;
-                            }
-                        }
-                    }
-                }
-                ?>
-                <div class="cell <?= $isCity ? 'city' : '' ?> <?= $regenClass ?>"data-heavy="<?= $heavyTotal ?>"data-light="<?= $lightTotal ?>"<?= $dataAttrs ?>>
-                    <?php if ($cell && $cell['discovery'] !== 0): ?>
-                    <div class="item-count"
-                        data-heavy="<?= $heavyTotal ?>"
-                        data-light="<?= $lightTotal ?>">
-                    </div>
-                    <?php endif; ?>
-                </div>
-                <?php endfor; ?>
-            <?php endfor; ?>
-            </div>
-
-            <div class="coords-y">
-                <?php for($y=$maxY;$y>=$minY;$y--): ?>
-                    <div class="coord"><?= $y ?></div>
-                <?php endfor; ?>
-            </div>
-
-            <!-- Coord X Bottom -->
-            <div></div>
-            <div class="coords-x" style="grid-template-columns:repeat(<?= $maxX-$minX+1 ?>,30px)">
-                <?php for($x=$minX;$x<=$maxX;$x++): ?>
-                    <div class="coord"><?= $x ?></div>
-                <?php endfor; ?>
-            </div>
-            <div></div>
-
-        </div> <!-- class="map-container" -->
+// =============================================================================================================
+// Commencement des listes
+// =============================================================================================================
 
 
-        <div class="map-filters">
-            <!-- CHECKBOX PA / KM / SCRUT / ...  -->
+// Liste des fouilles
 
-            <div>
-                <span style="color:red;padding-left: 15px;">PA : </span>
-                <label><input type="checkbox" class="pa-toggle" data-pa="10" > 10</label>
-                <label><input type="checkbox" class="pa-toggle" data-pa="12" > 12</label>
-                <label><input type="checkbox" class="pa-toggle" data-pa="14" > 14</label>
-                <label><input type="checkbox" class="pa-toggle" data-pa="16" > 16</label>
-                <label><input type="checkbox" class="pa-toggle" data-pa="22" > 22</label>
-                <label><input type="checkbox" class="pa-toggle" data-pa="24" > 24</label>
-                <label><input type="checkbox" class="pa-toggle" data-pa="26" > 26</label>
-                <label><input type="checkbox" class="pa-toggle" data-pa="32" > 32</label>
-            </div>
-            <div>
-                <span style="color:rgb(0, 255, 255);padding-left: 15px;">KM :</span>
-                <label><input type="checkbox" class="km-toggle" data-km="6" > 6</label>
-                <label><input type="checkbox" class="km-toggle" data-km="10"> 10</label>
-                <label><input type="checkbox" class="km-toggle" data-km="11"> 11</label>
-                <label><input type="checkbox" class="km-toggle" data-km="15" > 15</label>
-                <label><input type="checkbox" class="km-toggle" data-km="21"> 21</label>
-            </div>
-            <div style="display:flex; align-items:center;">
-                <div class="item">
-                    <span style="color:blue;">Scrut :</span>
-                    <label><input type="checkbox" id="scrut-toggle" checked> Oui</label>
-                </div>
-                <div class="item">
-                    <span style="color:black;">Bâtiment :</span>
-                    <label><input type="checkbox" id="building-toggle" checked> Oui</label>
-                </div>
-                <div class="item">
-                    <span style="color:rgb(201, 198, 0);">Citoyens :</span>
-                    <label><input type="checkbox" id="citizen-toggle" checked> Oui</label>
-                </div>
-                <div class="item">
-                    <span style="color:black;">Zoo :</span>
-                    <label><input type="checkbox" id="zoo-toggle" checked> Oui</label>
-                </div>
-            </div>
-        </div> <!--class="map-filters">-->
-    </div> <!--class="map-wrapper">-->
-    <div id="tooltip" class="tooltip"></div>
+$results = [];
 
-<!-- ========================= RECAP DES BATIMENTS ========================== -->
-    <div class="sidebar">
-        <div class="recap-grid">
-            <!-- COLONNE 1 : Plan JAUNE -->
-            <div class="recap-cell">
-                <b>Plan JAUNE</b>
-                <?php foreach ($buildingsRecap['near'] as $b): ?>
-                    <div class="building-line">
-                        <div class="b-name building-tooltip-target"
-                            data-drops='<?= json_encode($b["drops"], JSON_HEX_APOS | JSON_HEX_QUOT) ?>'>
-                            <?= $b['name'] ?>
-                        </div>
-                        <div class="b-coords">(<?= $b['x'] ?>,<?= $b['y'] ?>)</div>
-                        <div class="b-distance"><?= $b['distance'] ?> km</div>
-                        <div class="b-full <?= $b['full'] ? 'full' : 'empty' ?>"><?= $b['full'] ? 'Plein' : 'Vide' ?></div>
-                        <div class="b-bury"><?= $b['bury'] > 0 ? '('.$b['bury'].')' : '' ?></div>
-                    </div>
-                <?php endforeach; ?>
-            </div>
+$userStmt->execute([$town_id]);
+$users = $userStmt->fetchAll(PDO::FETCH_ASSOC);
 
-            <!-- COLONNE 2 : Plan BLEU -->
-            <div class="recap-cell">
-                <b>Plan BLEU</b>
-                <?php foreach ($buildingsRecap['far'] as $b): ?>
-                    <div class="building-line">
-                        <div class="b-name building-tooltip-target"
-                            data-drops='<?= json_encode($b["drops"], JSON_HEX_APOS | JSON_HEX_QUOT) ?>'>
-                            <?= $b['name'] ?>
-                        </div>
-                        <div class="b-coords">(<?= $b['x'] ?>,<?= $b['y'] ?>)</div>
-                        <div class="b-distance"><?= $b['distance'] ?> km</div>
-                        <div class="b-full <?= $b['full'] ? 'full' : 'empty' ?>"><?= $b['full'] ? 'Plein' : 'Vide' ?></div>
-                        <div class="b-bury"><?= $b['bury'] > 0 ? '('.$b['bury'].')' : '' ?></div>
-                    </div>
-                <?php endforeach; ?>
-            </div>
+foreach ($users as $u) {
 
-            <!-- COLONNE 3 : Ruine -->
-            <div class="recap-cell">
-                <b>Ruine</b>
-                <?php foreach ($buildingsRecap['multi'] as $b): ?>
-                    <div class="building-line">
-                        <div class="b-name building-tooltip-target"
-                            data-drops='<?= json_encode($b["drops"], JSON_HEX_APOS | JSON_HEX_QUOT) ?>'>
-                            <?= $b['name'] ?>
-                        </div>
-                        <div class="b-coords">(<?= $b['x'] ?>,<?= $b['y'] ?>)</div>
-                        <div class="b-distance"><?= $b['distance'] ?> km</div>
-                        <div class="b-bury"><?= $b['bury'] > 0 ? '('.$b['bury'].')' : '' ?></div>
-                    </div>
-                <?php endforeach; ?>
-            </div>
-        </div>
-        <div id="building-tooltip" style="position:absolute; display:none; padding:5px 8px; font-size:11px; border-radius:4px; z-index:2000; pointer-events:none;"></div>
+    /* citizen.id + zone_id */
+    $posStmt->execute([$u['user_id'], $town_id]);
+    $citizen = $posStmt->fetch(PDO::FETCH_ASSOC);
 
-
-    <!-- ========================= RECAP DES OBJETS  ========================== -->
-
-        <div class="item-summary-full">
-            <div class="recap-cell">
-                <?php foreach ($categoryLabels as $catId => $catLabel): ?>
-                    <?php if (empty($itemSummary[$catId])) continue; ?>
-
-                    <div class="recap-objets-category">
-                        <div class="recap-objets-category-title"><?= htmlspecialchars($catLabel) ?></div>
-
-                        <div class="recap-objets-list">
-                            <?php 
-                            // Regrouper les objets par nom et compter les cassés / pas cassés
-                            $groupedItems = [];
-
-                            foreach ($itemSummary[$catId] as $item) {
-                                $protoId = $item['prototype_id'];
-
-                                if (!isset($groupedItems[$protoId])) {
-                                    $groupedItems[$protoId] = [
-                                        'name' => $item['name'],
-                                        'count_ok' => 0,
-                                        'count_broken' => 0,
-                                        'img' => getItemImagePathFast($item['name'], $itemImages)
-                                    ];
-                                }
-
-                                if ($item['broken']) {
-                                    $groupedItems[$protoId]['count_broken'] += $item['count'];
-                                } else {
-                                    $groupedItems[$protoId]['count_ok'] += $item['count'];
-                                }
-                            }
-                            krsort($groupedItems, SORT_NUMERIC);
-                            // Affichage
-                            foreach ($groupedItems as $protoId => $data):
-                                if (!$data['img']) continue;
-                            ?>
-                            <div class="recap-objets-item" data-item="<?= htmlspecialchars($data['name']) ?>">
-                                <div class="recap-objets-count">
-                                    <?= $data['count_ok'] ?>
-                                    <?php if ($data['count_broken'] > 0) echo " (+".$data['count_broken'].")"; ?>
-                                </div>
-                                <img src="<?= htmlspecialchars($data['img']) ?>"
-                                    alt="<?= htmlspecialchars($data['name']) ?>"
-                                    title="<?= htmlspecialchars($protoId . ' : ' . $data['name']) ?>"" />
-                            </div>
-                            <?php endforeach; ?>
-                        </div>
-                    </div>
-
-                <?php endforeach; ?>
-            </div>
-        </div>
-
-    <!-- ========================= RECAP DES EXPEDITIONS  ========================== -->
-        <div class="recap-expeditions">
-            <div class="recap-cell">
-                <b>Expéditions</b>
-
-                <div class="expeditions-grid">
-                    <?php foreach ($expeditions as $exp): ?>
-                        <div class="expedition-line">
-                            <label>
-                                <input type="checkbox"
-                                    class="expedition-checkbox"
-                                    data-expedition-id="<?= $exp['id'] ?>" >
-                                <?= htmlspecialchars($exp['label']) ?>
-                                (<?= $exp['length'] ?>)
-                            </label>
-                        </div>
-                    <?php endforeach; ?>
-                </div>
-            </div>
-        </div>
-
-    </div> <!-- class="sidebar" -->
-</div> <!-- class="layout" -->
-
-
-<script>
-// =======================================
-// VARIABLES
-// =======================================
-const EXPEDITIONS = <?= json_encode($expeditions, JSON_UNESCAPED_UNICODE) ?>;
-const expeditionMap = {};
-EXPEDITIONS.forEach(e => expeditionMap[e.id] = e);
-
-const cellExpeditions = {}; // key = "x_y" => Set of expedition ids
-function getCellKey(x, y) { return `${x}_${y}`; }
-
-// =======================================
-// AIDE ANGLE
-// =======================================
-function invertDirection(dir) {
-    if(dir==='LEFT') return 'RIGHT';
-    if(dir==='RIGHT') return 'LEFT';
-    if(dir==='UP') return 'DOWN';
-    if(dir==='DOWN') return 'UP';
-    return dir;
-}
-
-// =======================================
-// DESSIN
-// =======================================
-function drawSegment(cell, from, to) {
-    const mid = '50%';
-    function h(left,right){
-        const d = document.createElement('div');
-        d.className='exp-line exp-h';
-        d.style.left = left; d.style.right=right;
-        d.style.background='#000';
-        cell.appendChild(d);
-    }
-    function v(top,bottom){
-        const d = document.createElement('div');
-        d.className='exp-line exp-v';
-        d.style.top = top; d.style.bottom=bottom;
-        d.style.background='#000';
-        cell.appendChild(d);
+    if (!$citizen) {
+        continue;
     }
 
-    // droites horizontales
-    if ((from==='LEFT' && to==='RIGHT')||(from==='RIGHT' && to==='LEFT')){ h('0','0'); return; }
-    // droites verticales
-    if ((from==='UP' && to==='DOWN')||(from==='DOWN' && to==='UP')){ v('0','0'); return; }
+    $citizen_id = $citizen['id'];
+    $zone_id    = $citizen['zone_id'];
 
-    // centre → direction
-    if(from==='CENTER'){
-        if(to==='LEFT') h('0',mid);
-        if(to==='RIGHT') h(mid,'0');
-        if(to==='UP') v('0',mid);
-        if(to==='DOWN') v(mid,'0');
-        return;
-    }
+    /* fouilles */
+    $digStmt->execute([$zone_id, $citizen_id]);
+    $digs = $digStmt->fetchAll(PDO::FETCH_ASSOC);
 
-    // direction → centre
-    if(to==='CENTER'){
-        if(from==='LEFT') h('0',mid);
-        if(from==='RIGHT') h(mid,'0');
-        if(from==='UP') v(mid,'0');
-        if(from==='DOWN') v('0',mid);
-        return;
-    }
+    $zoneStmt->execute([$zone_id]);
+    $zone = $zoneStmt->fetch(PDO::FETCH_ASSOC);
 
-    // angles
-    if(from==='LEFT'||from==='RIGHT'){
-        h(from==='LEFT'?'0':mid, from==='LEFT'?mid:'0');
-        if(to==='UP') v(mid, '0');
-        else if(to==='DOWN') v('0', mid);
-    }
-    if(from==='UP'||from==='DOWN'){
-        v(from==='UP'?mid:'0', from==='UP'?'0':mid);
-        if(to==='LEFT') h('0', mid);
-        else if(to==='RIGHT') h(mid, '0');
-    }
-}
+    if (!$zone) {continue;};
 
-// =======================================
-// DIRECTION ENTRE DEUX CASES
-// =======================================
-function getDirection(x1,y1,x2,y2){
-    if(x1===x2 && y1===y2) return 'CENTER';
-    if(x1===x2) return y2>y1?'DOWN':'UP';
-    if(y1===y2) return x2>x1?'RIGHT':'LEFT';
-    return x2>x1?'RIGHT':'LEFT';
-}
+    $distance = round(sqrt(($zone['x'] ** 2) + ($zone['y'] ** 2)));
 
-// =======================================
-// EXPAND PATH (cases intermédiaires)
-// =======================================
-function expandPath(path){
-    if(!path||path.length===0) return [];
-    const expanded=[];
-    let [cx,cy]=path[0];
-    expanded.push([cx,cy]);
-    for(let i=1;i<path.length;i++){
-        const [tx,ty]=path[i];
-        const dx=Math.sign(tx-cx);
-        const dy=Math.sign(ty-cy);
-        while(cx!==tx||cy!==ty){
-            if(cx!==tx) cx+=dx;
-            if(cy!==ty) cy+=dy;
-            expanded.push([cx,cy]);
-        }
-    }
-    console.log(expanded);
-    return expanded;
-}
+    //if ($currentHour < 22){if ($distance < 3) {continue;}}
 
-// =======================================
-// UPDATE CELL
-// =======================================
-function updateCell(x,y){
-    const cell=document.querySelector(`.cell[data-x="${x}"][data-y="${y}"]`);
-    if(!cell) return;
-    cell.querySelectorAll('.exp-line').forEach(e=>e.remove());
+    $nameStmt->execute([$u['user_id']]);
+    $userRow = $nameStmt->fetch(PDO::FETCH_ASSOC);
+    $username = $userRow ? $userRow['name'] : '???';
 
-    const key=getCellKey(x,y);
-    const expeditionsHere=cellExpeditions[key];
-    if(!expeditionsHere) return;
-
-    expeditionsHere.forEach(id=>{
-        const expedition=expeditionMap[id];
-        if(!expedition) return;
-        const path=expandPath(expedition.path);
-
-        for(let i=0;i<path.length;i++){
-            const [cx,cy]=path[i];
-            if(cx!==x||cy!==y) continue;
-
-            const prev=path[i-1]||null;
-            const next=path[i+1]||null;
-
-            const rawFrom = prev ? getDirection(prev[0],prev[1],cx,cy) : 'CENTER';
-            const from = prev ? invertDirection(rawFrom) : 'CENTER';
-            const to = next ? getDirection(cx,cy,next[0],next[1]) : 'CENTER';
-
-            // 🔹 LOG DÉTAILLÉ
-            console.log('=== Cell ===');
-            console.log('Cell coords:', cx, cy);
-            console.log('Expedition ID:', id, expedition.label);
-            console.log('Previous cell:', prev, 'Next cell:', next);
-            console.log('Raw direction from prev→current:', rawFrom);
-            console.log('Inverted from (entrance direction):', from);
-            console.log('To (exit direction):', to);
-            console.log('--------------------------');
-
-            drawSegment(cell,from,to);
-        }
-    });
-}
-
-// =======================================
-// APPLY EXPEDITION
-// =======================================
-function applyExpedition(expedition,enabled){
-    const path=expandPath(expedition.path);
-    path.forEach(([x,y])=>{
-        const key=getCellKey(x,y);
-        if(!cellExpeditions[key]) cellExpeditions[key]=new Set();
-        if(enabled) cellExpeditions[key].add(expedition.id);
-        else{
-            cellExpeditions[key].delete(expedition.id);
-            if(cellExpeditions[key].size===0) delete cellExpeditions[key];
-        }
-        updateCell(x,y);
-    });
-}
-
-// =======================================
-// LISTENER CHECKBOX
-// =======================================
-document.querySelectorAll('.expedition-checkbox').forEach(cb=>{
-    cb.addEventListener('change',()=>{
-        const expedition=expeditionMap[cb.dataset.expeditionId];
-        if(!expedition) return;
-        applyExpedition(expedition,cb.checked);
-    });
-});
-</script>
-
-
-
-
-<!-- ===================== Checkbox PA ===================== -->
-<script>
-// Fonction pour recalculer les bordures PA
-function updatePABorders() {
-    const checkedBoxes = document.querySelectorAll('.pa-toggle:checked');
-    const activePAs = Array.from(checkedBoxes).map(cb => parseInt(cb.dataset.pa));
-    
-    const cells = document.querySelectorAll('.cell');
-
-    // Supprime toutes les anciennes div
-    cells.forEach(cell => {
-        cell.querySelectorAll('.pa-border-top, .pa-border-bottom, .pa-border-left, .pa-border-right')
-            .forEach(div => div.remove());
-    });
-
-    if (!activePAs.length) return;
-
-    cells.forEach(cell => {
-        const x = parseInt(cell.dataset.x);
-        const y = parseInt(cell.dataset.y);
-        const dist = (Math.abs(x) + Math.abs(y)) * 2;
-
-        activePAs.forEach(pa => {
-            if (dist !== pa) return;
-
-            const neighbors = [
-                {dx:0,dy:1,side:'top'},
-                {dx:0,dy:-1,side:'bottom'},
-                {dx:1,dy:0,side:'right'},
-                {dx:-1,dy:0,side:'left'},
-            ];
-
-            neighbors.forEach(n => {
-                const nx = x + n.dx;
-                const ny = y + n.dy;
-                const neighbor = document.querySelector(`.cell[data-x="${nx}"][data-y="${ny}"]`);
-                const ndist = neighbor ? (Math.abs(nx)+Math.abs(ny))*2 : Infinity;
-                if (ndist > pa) {
-                    const div = document.createElement('div');
-                    div.className = 'pa-border-' + n.side;
-                    cell.appendChild(div);
-                }
-            });
-        });
-    });
-}
-
-// Événement sur **toutes les checkboxes PA**
-document.querySelectorAll('.pa-toggle').forEach(cb => {cb.addEventListener('change', updatePABorders);});
-updatePABorders();
-</script>
-
-<!-- ===================== Checkbox KM ===================== -->
-<script>
-function updateKMBorders() {
-    const checkedBoxes = document.querySelectorAll('.km-toggle:checked');
-    const activeKMs = Array.from(checkedBoxes).map(cb => parseInt(cb.dataset.km));
-    
-    const cells = document.querySelectorAll('.cell');
-
-    // Supprime toutes les anciennes div KM
-    cells.forEach(cell => {
-        cell.querySelectorAll('.km-border-top, .km-border-bottom, .km-border-left, .km-border-right')
-            .forEach(div => div.remove());
-    });
-
-    if (!activeKMs.length) return;
-
-    cells.forEach(cell => {
-        const x = parseInt(cell.dataset.x);
-        const y = parseInt(cell.dataset.y);
-        const dist = Math.round(Math.sqrt(x*x + y*y));
-
-        activeKMs.forEach(km => {
-            if (dist !== km) return;
-
-            const neighbors = [
-                {dx:0,dy:1,side:'top'},
-                {dx:0,dy:-1,side:'bottom'},
-                {dx:1,dy:0,side:'right'},
-                {dx:-1,dy:0,side:'left'},
-            ];
-
-            neighbors.forEach(n => {
-                const nx = x + n.dx;
-                const ny = y + n.dy;
-                const neighbor = document.querySelector(`.cell[data-x="${nx}"][data-y="${ny}"]`);
-                const ndist = neighbor ? Math.round(Math.sqrt(nx*nx + ny*ny)) : Infinity;
-                if (ndist > km) {
-                    const div = document.createElement('div');
-                    div.className = 'km-border-' + n.side;
-                    cell.appendChild(div);
-                }
-            });
-        });
-    });
-}
-
-// Event sur toutes les checkboxes KM
-document.querySelectorAll('.km-toggle').forEach(cb => {cb.addEventListener('change', updateKMBorders);});
-updateKMBorders();
-</script>
-
-<!-- ===================== Checkbox Scrut ===================== -->
-<script>
-function getZone(x, y) {
-    if (x === 0 && y === 0) return 'VILLE'; // ville
-    if (y >= 0 && Math.abs(x) <= Math.floor(y / 2)) return 'N';
-    if (y <= 0 && Math.abs(x) <= Math.floor(-y / 2)) return 'S';
-    if (x <= 0 && Math.abs(y) <= Math.floor(-x / 2)) return 'O';
-    if (x >= 0 && Math.abs(y) <= Math.floor(x / 2)) return 'E';
-    if (x > 0 && y > 0) return 'NE';
-    if (x < 0 && y > 0) return 'NO';
-    if (x > 0 && y < 0) return 'SE';
-    if (x < 0 && y < 0) return 'SO';
-    return 'VILLE';
-}
-
-function updateScrutBorders() {
-    const checked = document.getElementById('scrut-toggle').checked;
-    const cells = document.querySelectorAll('.cell');
-
-    // Supprime toutes les anciennes bordures Scrut
-    cells.forEach(cell => {
-        cell.querySelectorAll('.scrut-border-top,.scrut-border-bottom,.scrut-border-left,.scrut-border-right')
-            .forEach(div => div.remove());
-    });
-
-    if (!checked) return;
-
-    cells.forEach(cell => {
-        const x = parseInt(cell.dataset.x);
-        const y = parseInt(cell.dataset.y);
-        const zone = getZone(x, y);
-
-        const neighbors = [
-            {dx:0,dy:1,side:'top'},
-            {dx:0,dy:-1,side:'bottom'},
-            {dx:1,dy:0,side:'right'},
-            {dx:-1,dy:0,side:'left'},
+    foreach ($digs as $dig) {
+        $results[] = [
+            'user'      => $username,
+            'time'      => substr($dig['timestamp'], 11, 8),
+            'sort'      => substr($dig['timestamp'], 11, 8),
+            'exhausted' => ((int)$zone['digs'] === 0)
         ];
-
-        neighbors.forEach(n => {
-            const nx = x + n.dx;
-            const ny = y + n.dy;
-            const neighbor = document.querySelector(`.cell[data-x="${nx}"][data-y="${ny}"]`);
-            if (!neighbor) return;
-            const neighborZone = getZone(nx, ny);
-            if (zone !== neighborZone) {
-                const div = document.createElement('div');
-                div.className = 'scrut-border-' + n.side;
-                cell.appendChild(div);
-            }
-        });
-    });
+    }
 }
-
-// Event checkbox
-document.getElementById('scrut-toggle').addEventListener('change', updateScrutBorders);
-updateScrutBorders()
-</script>
-
-<!-- ===================== Checkbox Bâtiments ===================== -->
-<script>
-const buildingCells = [<?php foreach ($buildingsRecap as $group) {foreach ($group as $b) {echo '{x: '.(int)$b['x'].', y: '.(int)$b['y'].'},';}}?>];
-
-function updateBuildingBorders() {
-    const checked = document.getElementById('building-toggle').checked;
-    const cells = document.querySelectorAll('.cell');
-
-    // Supprime toutes les anciennes div building-border
-    cells.forEach(cell => {
-        cell.querySelectorAll('.building-border').forEach(div => div.remove());
-    });
-
-    if (!checked) return;
-
-    buildingCells.forEach(b => {
-        const cell = document.querySelector(`.cell[data-x="${b.x}"][data-y="${b.y}"]`);
-        if (!cell) return;
-
-        const div = document.createElement('div');
-        div.className = 'building-border';
-        cell.appendChild(div);
-    });
-}
-
-// Event checkbox
-document.getElementById('building-toggle').addEventListener('change', updateBuildingBorders);
-updateBuildingBorders();
-</script>
-
-<!-- ===================== Checkbox Citoyens ===================== -->
-<script>
-const citizenCells = [<?php foreach ($citizens as $c) {echo '{x: '.$c['x'].', y: '.$c['y'].'},';}?>];
-
-function updateCitizenBorders() {
-    const checked = document.getElementById('citizen-toggle').checked;
-    const cells = document.querySelectorAll('.cell');
-
-    // Supprime toutes les anciennes div citizen-border
-    cells.forEach(cell => {
-        cell.querySelectorAll('.citizen-border').forEach(div => div.remove());
-    });
-
-    if (!checked) return;
-
-    citizenCells.forEach(c => {
-        const cell = document.querySelector(`.cell[data-x="${c.x}"][data-y="${c.y}"]`);
-        if (!cell) return;
-
-        const div = document.createElement('div');
-        div.className = 'citizen-border';
-        cell.appendChild(div);
-    });
-}
-
-// Event checkbox
-document.getElementById('citizen-toggle').addEventListener('change', updateCitizenBorders);
-updateCitizenBorders();
-</script>
-
-
-<!-- ===================== Checkbox Objets ===================== -->
-<script>
-const itemImagesMap = <?= json_encode($itemImages) ?>;
-const activeObjects = new Set();
-
-// Équivalent JS exact de getItemImagePathFast()
-function getItemImagePathFastJS(name, map) {
-    const key = name.replace(/_#\d+$/, '');
-    return map[key] || null;
-}
-
-// Clique sur les objets du récap
-document.querySelectorAll('.recap-objets-item').forEach(itemDiv => {
-    itemDiv.addEventListener('click', () => {
-        const img = itemDiv.querySelector('img');
-        if (!img) return;
-
-        const path = getItemImagePathFastJS(img.alt, itemImagesMap);
-        if (!path) return;
-
-        // toggle actif
-        itemDiv.classList.toggle('active-object');
-        activeObjects.has(path) ? activeObjects.delete(path) : activeObjects.add(path);
-
-        updateObjectBorders();
-    });
+usort($results, function ($a, $b) {
+    return strcmp($a['sort'], $b['sort']);
 });
+?>
 
-// Met à jour les bordures sur la carte
-function updateObjectBorders() {
-    const cells = document.querySelectorAll('.cell');
+<?php
+$idCitizenStmt = $pdo->prepare("SELECT id, user_id, zone_id FROM citizen WHERE town_id = ? AND alive = 1");  // Citoyens de la ville
+$bankStmt = $pdo->prepare("SELECT bank_id FROM town WHERE id = ?");  // 2️⃣ Bank ID de la ville
+$statusStmt = $pdo->prepare("SELECT citizen_status_id FROM citizen_citizen_status WHERE citizen_id = ?");  // Statuts des citoyens
+$buildingStmt = $pdo->prepare("SELECT complete FROM building WHERE town_id=? AND prototype_id=?");  // Vérifier building complete
+$csUpgradeStmt = $pdo->prepare("SELECT prototype_id, level FROM citizen_home_upgrade WHERE home_id = ? AND prototype_id=5");  // Vérifier CS upgrade
+$clotureUpgradeStmt = $pdo->prepare("SELECT prototype_id, level FROM citizen_home_upgrade WHERE home_id = ? AND prototype_id=7");  // Vérifier Clôture upgrade
+$renfortUpgradeStmt = $pdo->prepare("SELECT prototype_id, level FROM citizen_home_upgrade WHERE home_id = ? AND prototype_id=9");  // Vérifier Renfort upgrade
+$itemStmt = $pdo->prepare("SELECT prototype_id FROM item WHERE inventory_id=? AND prototype_id=?");  // Vérifier item dans la bank
+$nameStmt = $pdo->prepare("SELECT name FROM user WHERE id = ?");  // Récupérer le pseudo
+$logStmt = $pdo->prepare("SELECT type, timestamp FROM action_event_log WHERE citizen_id = ? ORDER BY timestamp DESC LIMIT 5");
+$actionStmt = $pdo->prepare("SELECT citizen_id, type, count FROM action_counter WHERE last >= CURDATE() AND last < CURDATE() + INTERVAL 1 DAY");
+$cuisineStmt = $pdo->prepare("SELECT level FROM citizen_home_upgrade WHERE home_id = ? AND prototype_id = 3");
+$laboStmt = $pdo->prepare("SELECT level FROM citizen_home_upgrade WHERE home_id = ? AND prototype_id = 2");
+$campingChance = $pdo->prepare("SELECT camping_chance FROM citizen WHERE town_id = ? AND id = ? AND alive = 1");
+$goule = $pdo->prepare("SELECT citizen_id FROM citizen_citizen_role WHERE citizen_role_id = 4");
+$voracite = $pdo->prepare("SELECT ghul_hunger FROM citizen WHERE id=?;");
 
-    // Nettoyage
-    cells.forEach(cell => {
-        cell.querySelectorAll('.item-border').forEach(div => div.remove());
-    });
+$idCitizenStmt->execute([$town_id]);
+$citizens = $idCitizenStmt->fetchAll(PDO::FETCH_ASSOC);
+$bankStmt->execute([$town_id]);
+$bank_id = $bankStmt->fetchColumn();
+$actionStmt->execute();
+$actionsToday = [];
+foreach ($actionStmt->fetchAll(PDO::FETCH_ASSOC) as $row) {$actionsToday[(int)$row['citizen_id']][(int)$row['type']] = (int)$row['count'];}
+$lists = [];
 
-    if (activeObjects.size === 0) return;
+// Cantine centrale (prototype_id = 48)
+$buildingStmt->execute([$town_id, 48]);
+$cantineCentrale = ($buildingStmt->fetchColumn() == 1);
+// Labo central (prototype_id = 49)
+$buildingStmt->execute([$town_id, 49]);
+$laboCentral = ($buildingStmt->fetchColumn() == 1);
+// Les goules de la ville
+$goule->execute();
+$listeGoules = $goule->fetchAll(PDO::FETCH_COLUMN);
 
-    cells.forEach(cell => {
-        const itemsData = cell.dataset.items ? JSON.parse(cell.dataset.items) : {};
-        let hasActiveObject = false;
+foreach ($citizens as $c) {
+    $citizen_id = $c['id'];
+    $citizen_user_id = $c['user_id'];
 
-        // itemsData = { catId: { path: {ok, broken} } }
-        Object.values(itemsData).some(categoryItems =>
-            Object.keys(categoryItems).some(path =>
-                activeObjects.has(path) && (hasActiveObject = true)
-            )
-        );
+    // pseudo réel
+    $nameStmt->execute([$c['user_id']]);
+    $userRow = $nameStmt->fetch(PDO::FETCH_ASSOC);
+    $username = $userRow ? $userRow['name'] : '???';
 
-        if (hasActiveObject) {
-            const div = document.createElement('div');
-            div.className = 'item-border';
-            cell.appendChild(div);
+    // statuts
+    $statusStmt->execute([$citizen_id]);
+    $statuses = $statusStmt->fetchAll(PDO::FETCH_COLUMN, 0); // array of citizen_status_id
+    $statusesInt = array_map('intval', $statuses);
+
+    // CS
+    $csUpgradeStmt->execute([$citizen_id]);
+    $homeUpgrade = $csUpgradeStmt->fetch(PDO::FETCH_ASSOC);
+    
+    // -----------------------------
+    // 1️⃣ Déshydratés (status_id=12)
+    if (in_array(12, $statusesInt)) {
+        $suffix = '';
+        if (array_intersect([6,7,8], $statusesInt)) {
+            $suffix = ' (VLM)';
         }
-    });
-}
-</script>
-
-<!-- ===================== Checkbox ZOO ===================== -->
-
-<script>
-const zooToggle = document.getElementById('zoo-toggle');
-let zooRect = null;
-
-if (zooToggle) {
-    zooToggle.addEventListener('change', updateZooRectangle);
-    updateZooRectangle(); // état initial
-}
-
-function updateZooRectangle() {
-    const mapEl = document.querySelector('.map');
-    if (!mapEl) return;
-
-    // Supprime le rectangle existant
-    if (zooRect) {
-        zooRect.remove();
-        zooRect = null;
+        $lists['Deshydrates'][] = $username . $suffix;
     }
 
-    if (!zooToggle.checked) return;
+    // 2️⃣ Infectés (status_id=13)
+    if (in_array(15, $statusesInt)) {
+        $suffix = '';
+        if (array_intersect([6,7,8], $statusesInt)) $suffix = ' (VLM)';
+        if (in_array(5, $statusesInt)) $suffix = $suffix ? $suffix . ' (PARA)' : ' (PARA)';
+        $lists['INFECTES !!'][] = $username . $suffix;
+    }
 
-    // Coordonnées zoo
-    const minX = -11;
-    const maxX = -6;
-    const minY = -11;
-    const maxY = -5;
+    if ($currentDay <40) {
+        // 3️⃣ Bassin (status_id !=81) → affiché uniquement si building complete=1
+        $buildingStmt->execute([$town_id, 113]);
+        $complete = $buildingStmt->fetchColumn();
+        if ($complete == 1 && !in_array(81, $statusesInt)) {
+            $lists['BASSIN !!'][] = $username;
+        }
+    }
 
-    // Récupère les cellules coins
-    const cells = [...document.querySelectorAll('.cell')];
+    // 4️⃣ Bu (status_id !=2)
+    if (!in_array(2, $statusesInt)) {
+        $lists['Pas Bu'][] = $username;
+    }
 
-    const topLeft = cells.find(c => +c.dataset.x === minX && +c.dataset.y === maxY);
-    const bottomRight = cells.find(c => +c.dataset.x === maxX && +c.dataset.y === minY);
+    // 5️⃣ Mangé (status_id !=3)
+    if (!in_array(3, $statusesInt)) {
+        $lists['Pas Mange'][] = $username;
+    }
 
-    const mapRect = mapEl.getBoundingClientRect();
-    const tlRect = topLeft.getBoundingClientRect();
-    const brRect = bottomRight.getBoundingClientRect();
+    // 6️⃣ Home upgrade prototype_id=5
+    if ($homeUpgrade && !in_array(55, $statusesInt)) {
+        $lists['Sieste'][] = $username;
+    }
 
-    zooRect = document.createElement('div');
-    zooRect.className = 'zoo-rectangle';
+    // 7️⃣ Dés (prototype_id=247 dans bank)
+    $itemStmt->execute([$bank_id, 247]);
+    $hasItem247 = $itemStmt->fetchColumn();
+    if ($hasItem247 && !in_array(31, $statusesInt)) {
+        $lists['Dés'][] = $username;
+    }
 
-    zooRect.style.left = (tlRect.left - mapRect.left) + 'px';
-    zooRect.style.top = (tlRect.top - mapRect.top) + 'px';
-    zooRect.style.width = (brRect.right - tlRect.left)-5 + 'px';
-    zooRect.style.height = (brRect.bottom - tlRect.top) + 'px';
+    // 8️⃣ Cartes 237
+    $itemStmt->execute([$bank_id, 237]);
+    $hasItem237 = $itemStmt->fetchColumn();
+    if ($hasItem237 && !in_array(32, $statusesInt)) {
+        $lists['Cartes'][] = $username;
+    }
 
-    mapEl.style.position = 'relative'; // sécurité
-    mapEl.appendChild(zooRect);
-}
-</script>
+    // 9️⃣ Ballon 368_369 (cassé / pas cassé)
+    $itemStmt->execute([$bank_id, 368]);
+    $hasItem368 = $itemStmt->fetchColumn();
+    $itemStmt->execute([$bank_id, 369]);
+    $hasItem369 = $itemStmt->fetchColumn();
+    if (($hasItem368 || $hasItem369) && !in_array(91, $statusesInt)) {
+        $lists['Ballon'][] = $username;
+    }
 
-<!-- ===================== HEAVY / LEGERS ===================== -->
+    // 1️⃣0️⃣ Drapeau 367
+    $itemStmt->execute([$bank_id, 367]);
+    $hasItem367 = $itemStmt->fetchColumn();
+    if ($hasItem367 && !in_array(92, $statusesInt)) {
+        $lists['DRAPEAU !!'][] = $username;
+    }
 
-<script>
-function updateItemCounts() {
-    const showHeavy = document.getElementById('filter-heavy').checked;
-    const showLight = document.getElementById('filter-light').checked;
+    // 1️⃣1️⃣ Sieste
+    if (!$homeUpgrade) {
+        $lists['CS à faire'][] = $username . ' (0)';
+    } elseif ((int)$homeUpgrade['level'] === 1) {
+        $lists['CS à faire'][] = $username . ' (1)';
+    }
 
-    document.querySelectorAll('.cell').forEach(cell => {
-        const countEl = cell.querySelector('.item-count');
-        if (!countEl) return;
+    // -----------------------------
+    // 1️⃣2️⃣ 1️⃣3️⃣ 1️⃣4️⃣ : AH restantes
 
-        const heavy = parseInt(cell.dataset.heavy || 0);
-        const light = parseInt(cell.dataset.light || 0);
+    $heroicStmt->execute([$citizen_id]);
+    $heroics = $heroicStmt->fetchAll(PDO::FETCH_COLUMN, 0);
+    $heroicsInt = array_map('intval', $heroics);
 
-        let total = 0;
-        if (showHeavy) total += heavy;
-        if (showLight) total += light;
+    // RDH restant (prototype_id = 1)
+    if (in_array(1, $heroicsInt)) {
+        $lists['Rdh'][] = $username;
+    }
 
-        // n'affiche rien si total = 0 ou si aucune checkbox cochée
-        countEl.textContent = total > 0 ? total : '';
-    });
-}
+    // SS restant (prototype_id = 4)
+    if (in_array(4, $heroicsInt)) {
+        $lists['Ss'][] = $username;
+    }
 
-// exécution au chargement
-window.addEventListener('DOMContentLoaded', updateItemCounts);
+    // Sauvetage restant (prototype_id = 10)
+    if (in_array(10, $heroicsInt)) {
+        $lists['Sauv'][] = $username;
+    }
+    // 1️⃣5️⃣ Repaire (status_id !=80) → affiché uniquement si building complete=1
+    $buildingStmt->execute([$town_id,151]);
+    $complete = $buildingStmt->fetchColumn();
+    if ($complete == 1 && !in_array(80, $statusesInt)) {
+        $lists['Repaire'][] = $username;
+    }
+ 
+   // 1️⃣6️⃣ Pas soif (status_id=11)
+    if ($currentDay <40) {
+        if (!in_array(11, $statusesInt)) {
+            $lists['Pas soif'][] = $username;
+        }
+    }
+   // 1️⃣7️⃣ Terreur (status_id=10)
+    if (in_array(10, $statusesInt)) {
+        $lists['Terreur'][] = $username;
+        // 1️⃣8️⃣ Teddy (prototype_id=46 dans bank)
+        $itemStmt->execute([$bank_id, 46]);
+        $hasItem247 = $itemStmt->fetchColumn();
+        if ($hasItem247 && !in_array(35, $statusesInt)) {
+            $lists['Teddy'][] = $username;
+        }
+    }
 
-// écouteurs
-document.getElementById('filter-heavy').addEventListener('change', updateItemCounts);
-document.getElementById('filter-light').addEventListener('change', updateItemCounts);
-</script>
+   // 1️⃣9️⃣ Citoyens bannis
+    if ($currentDay <40) {
+        $citizenInfoStmt->execute([$citizen_user_id, $town_id]);
+        $info = $citizenInfoStmt->fetch(PDO::FETCH_ASSOC);
+        if ((int)$info['banished'] == 1) {
+            $lists['Bannis'][] = $username;
+        }
+        else {
+            // 2️⃣0️⃣ Anti-abus
+            if (is_null($c['zone_id'])) {
+                $logStmt->execute([$citizen_id]);
+                $actions = $logStmt->fetchAll(PDO::FETCH_ASSOC);
 
-<!-- ===================== Mouse-over récap des bâtiments ===================== -->
-<script>
-const buildingTooltip = document.getElementById('building-tooltip');
+                $now = new DateTime();
+                $limit = (clone $now)->modify('-15 minutes');
+                $dates = array_map(fn($a) => new DateTime($a['timestamp']),$actions);          
+                $mostRecentDate = $dates[0];
+                $mostRecentType = (int)$actions[0]['type'];
+                $oldestDate = $dates[count($dates) - 1];
 
-document.querySelectorAll('.building-tooltip-target').forEach(el => {
-    el.addEventListener('mouseenter', () => {
-        const raw = el.dataset.drops;
-        if (!raw) return;
-
-        let drops;
-        try { drops = JSON.parse(raw); } 
-        catch(err) { console.error('JSON invalide', raw); return; }
-
-        if (!drops.length) { buildingTooltip.style.display = 'none'; return; }
-
-        let html = '';
-        drops.forEach(d => {
-            html += `<div class="building-tooltip-line">
-                        <img src="${d.img}" alt="" title="${d.pct}%">
-                        <span>${d.pct}%</span>
-                     </div>`;
-        });
-
-        buildingTooltip.innerHTML = html;
-
-        const rect = el.getBoundingClientRect();
-        buildingTooltip.style.left = (rect.right + 5 + window.scrollX) + 'px';
-        buildingTooltip.style.top  = (rect.top + window.scrollY) + 'px';
-        buildingTooltip.style.display = 'block';
-    });
-
-    el.addEventListener('mouseleave', () => {
-        buildingTooltip.style.display = 'none';
-    });
-});
-</script>
-
-
-<!-- ========================= Mouse-over cases ========================== -->
-<script>
-const tooltip = document.getElementById('tooltip');
-
-document.querySelectorAll('.cell').forEach(cell => {
-    cell.addEventListener('mouseenter', () => {
-        const discovery = cell.dataset.discovery;
-        const categoryLabels = {
-            1: 'Ress',
-            2: 'Déco',
-            3: 'Arme',
-            4: 'Cont',
-            5: 'Défs',
-            6: 'Drog',
-            7: 'Food',
-            8: 'Autr',
-        };
-        if (discovery == 0) {
-            tooltip.innerHTML = "Pas découverte";
-        } else {
-            const x = parseInt(cell.dataset.x);
-            const y = parseInt(cell.dataset.y);
-            const items = JSON.parse(cell.dataset.items || '{}'); // { "path/to/image.png": count }
-            const citizens = JSON.parse(cell.dataset.citizens || '[]');
-            const prototype = cell.dataset.prototype || '';
-            const day_update = cell.dataset.day_update;
-            const ruin_regen = cell.dataset.ruin_regen;
-
-            let html = `<div style="display:flex; justify-content:space-between;">
-                <span><strong>Coord :</strong> ${x} / ${y}</span>
-                <span style="padding-left:10px;"><strong>Distance :</strong> ${Math.round(Math.sqrt(x*x + y*y))} km</span>
-            </div>`;
-
-            if (day_update) html += `<div>MAJ: J${day_update}</div>`;
-            if (prototype) html += `<hr><div><strong>Bâtiment:</strong> ${prototype} (${ruin_regen > 0 ? 'plein' : 'vide'})</div>`;
-
-            // Citoyens par 7
-            html += `<hr><div><strong>Citoyens:</strong><br>`;
-            if (citizens.length) {
-                for (let i = 0; i < citizens.length; i += 7) {
-                    html += citizens.slice(i, i + 7).map(c => c).join(', ') + '<br>';
+                if ($mostRecentType === 2 && $mostRecentDate > $limit) {
+                    $nextAvailable = (clone $mostRecentDate)->modify('+15 minutes');
+                    $lists['Anti-abus'][] = $nextAvailable->format('H:i:s') . " " . $username;
                 }
-            } else html += 'Aucun<br>';
-            html += `</div>`;
+                else {
 
-            // Objets avec images
-            html += `<hr><div><strong><u>Objets :</u></strong><br>`;
-
-            if (Object.keys(items).length) {
-                for (const catId of Object.keys(categoryLabels)) {
-                    if (!items[catId]) continue;
-
-                    html += `<div><strong>${categoryLabels[catId]} : </strong><br>`;
-
-                    let i = 0;
-                    for (const [imgPath, counts] of Object.entries(items[catId])) {
-                        const ok = counts.ok || 0;
-                        const broken = counts.broken || 0;
-                        const total = ok + broken;
-
-                        if (total <= 0) continue;
-
-                        const style = broken > 0
-                            ? 'vertical-align:middle;margin:1px;padding:1px;border:1px solid red;box-sizing:content-box;'
-                            : 'vertical-align:middle;margin:1px;';
-
-                        html += `<img src="${imgPath}" width="16" height="16" style="${style}">`;
-
-                        if (total > 1) {
-                            html += `x${total} `;
-                        }
-
-                        i++;
-                        if (i % 10 === 0) html += '<br>';
+                    // 🟢 CAS 1 : la plus récente a plus de 15 minutes
+                    if ($mostRecentDate < $limit) {
+                        $lists['Anti-abus'][] = "." . $username . " : 5";
                     }
 
-                    html += `</div>`;
+                    // 🟡 CAS 2 : toutes les actions sont dans les 15 minutes
+                    elseif ($oldestDate > $limit) {
+                        $nextAvailable = (clone $mostRecentDate)->modify('+15 minutes');
+                        $lists['Anti-abus'][] = $nextAvailable->format('H:i:s') . " " . $username;
+                    }
+
+                    // 🔵 CAS 3 : cas intermédiaire
+                    else {
+                        $remaining = 0;
+                        foreach ($dates as $d) {
+                            if ($d < $limit) {
+                                $remaining++;
+                            }
+                        }
+                        $lists['Anti-abus'][] = "." . $username . " : " . $remaining;
+                    }
                 }
-            } else {
-                html += 'Aucun objet<br>';
             }
-
-            html += `</div>`;
-
-            tooltip.innerHTML = html;
-
-            // position tooltip
-            const rect = cell.getBoundingClientRect();
-            tooltip.style.left = (rect.right + 5) + 'px';
-            tooltip.style.top = (rect.top + window.scrollY) + 'px';
-            tooltip.style.display = 'block';
         }
-    });
+    }
+    if ($currentDay > 14) { // (J15+)
+        // 2️⃣1️⃣ Clôture
+        $clotureUpgradeStmt->execute([$citizen_id]);
+        $stmt = $clotureUpgradeStmt->fetch(PDO::FETCH_ASSOC);
+        if (!$stmt) {
+            $lists['Cloture'][] = $username;
+        }
+        // 2️⃣2️⃣ Au moins Renfort 1
+        $renfortUpgradeStmt->execute([$citizen_id]);
+        $stmt = $renfortUpgradeStmt->fetch(PDO::FETCH_ASSOC);
+        if (!$stmt) {
+            $lists['Renfort0'][] = $username;
+        }
+    }
 
-    cell.addEventListener('mouseleave', () => {
-        tooltip.style.display = 'none';
-    });
-});
-</script>
+    // 2️⃣3️⃣ Pas encore cuisiné ajd 
+    $cuisineStmt->execute([$citizen_id]);
+    $cuisine = $cuisineStmt->fetch(PDO::FETCH_ASSOC);
+
+    if ($cuisine) {
+        $level = (int)$cuisine['level'];
+        switch ($level) {
+            case 1:
+            case 2: $cuisineMax = 1; break;
+            case 3: $cuisineMax = 2; break;
+            case 4: $cuisineMax = 3; break;
+            default: $cuisineMax = 0;
+        }
+        if ($cantineCentrale) {$cuisineMax += 3;}
+        $cuisineAjd = $actionsToday[$citizen_id][2] ?? 0;
+        if ($cuisineAjd !== $cuisineMax) {$lists['Cuisine'][] = $level . " : " . $username . " (" . $cuisineAjd . "/" . $cuisineMax . ")";}
+    }
+
+    // 2️⃣4️⃣ Pas encore labo ajd 
+    $laboStmt->execute([$citizen_id]);
+    $labo = $laboStmt->fetch(PDO::FETCH_ASSOC);
+
+    if ($labo) {
+        $level = (int)$labo['level'];
+        if ($level >= 1 && $level <= 3) {$laboMax = 1;}
+        elseif ($level == 4) {$laboMax = 4;}
+        else {$laboMax = 0;}
+        if ($laboCentral) {$laboMax += 5;}
+        $laboAjd = $actionsToday[$citizen_id][3] ?? 0;
+        if ($laboAjd !== $laboMax) {$lists['Labo'][] = $level . " : " . $username . " (" . $laboAjd . "/" . $laboMax . ")";}
+    }
+
+    if ($currentDay >= 40) {
+        // 2️⃣5️⃣ 2️⃣6️⃣ Joueurs pas cachés / cachés + %  
+        $campingChance->execute([$town_id, $citizen_id]);
+        $campingChancePerCent = $campingChance->fetchColumn();
+        $campingChancePerCent *= 100;
+        if ($campingChancePerCent == 0) {
+            $lists['PAS CACHE !!'][] = $username;
+        }
+        else {
+            $lists['% camping'][] = $username . ' ' . $campingChancePerCent . '%';
+        }
+    }
+    
+    // 2️⃣7️⃣ Dépendant mais pas drogué (status_id)
+    if (in_array(14, $statusesInt) && !in_array(13, $statusesInt)) {
+        $lists['DROGUE !!!'][] = $username;
+    }
+
+    // 2️⃣8️⃣ Blessé (status_id)
+    if (
+        in_array(18, $statusesInt) ||
+        in_array(19, $statusesInt) ||
+        in_array(20, $statusesInt) ||
+        in_array(21, $statusesInt) ||
+        in_array(22, $statusesInt) ||
+        in_array(23, $statusesInt)
+    ) {
+        $lists['BLESSE !!!'][] = $username;
+    }
+    // 2️⃣9️⃣ Goules avec voracité
+    if (in_array($citizen_id, $listeGoules)) {
+        $voracite->execute([$citizen_id]);
+        $voracitepourcent = $voracite->fetchColumn();
+        if ($voracitepourcent > 40) {
+            $lists['Goules'][] = "!!!! " . $voracitepourcent . " : " . $username;
+        }
+        else {
+            $lists['Goules'][] = $voracitepourcent . " : " . $username;
+        }
+    }
+
+}
+
+
+
+
+
+foreach ($lists as $key => &$list) {
+    sort($list, SORT_NATURAL | SORT_FLAG_CASE);
+}
+unset($list); // sécurité
+?>
+
+<div class="lists-container">
+
+    <?php if (!empty($results)): ?>
+        <div class="list">
+            <strong><u>Fouille</u></strong><br>
+            <?php foreach ($results as $r): ?>
+                <span style="color:<?= $r['exhausted'] ? 'red' : 'inherit' ?>;">
+                    <?= htmlspecialchars($r['user']) ?>: <?= htmlspecialchars($r['time']) ?>
+                </span><br>
+            <?php endforeach; ?>
+        </div>
+    <?php endif; ?>
+
+    <?php
+    foreach ($lists as $title => $list) {
+        if (!empty($list)) {
+            echo '<div class="list">';
+            echo '<strong><u>' . htmlspecialchars($title) . '</u></strong><br>';
+            foreach ($list as $name) {
+                echo htmlspecialchars($name) . '<br>';
+            }
+            echo '</div>';
+        }
+    }
+    ?>
+
+</div>
 
 </body>
 </html>
