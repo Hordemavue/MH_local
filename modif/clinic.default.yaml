@@ -1,0 +1,65 @@
+score:
+  default: 0
+  poison: -1
+  professions:
+    tamer: 5
+  groups:
+    -
+      value: 1
+      items:
+        - 'food_bar1_#00'
+        - 'egg_#00'
+        - 'food_bar1_#00'
+        - 'food_tarte_#00'
+        - 'hmeat_#00'
+        - 'coffee_#00'
+        - 'woodsteak_#00'
+    -
+      value: 3
+      items:
+        - 'chama_#00'
+        - 'christmas_candy_#00'
+        - 'hmbrew_#00'
+        - 'food_pims_#00'
+        - 'food_noodles_hot_#00'
+        - 'food_noodles_#00'
+        - 'vegetable_#00'
+        - 'food_bar2_#00'
+        - 'omg_this_will_kill_you_#00'
+    -
+      value: 5
+      items:
+        - 'apple_#00'
+        - 'undef_#00'
+        - 'can_open_#00'
+        - 'vegetable_tasty_#00'
+        - 'dish_tasty_#00'
+    -
+      value: 7
+      items:
+        - 'fungus_#00'
+        - 'dish_#00'
+    -
+      value: 8
+      items:
+        - 'meat_#00'
+
+result:
+  -
+    min: 16
+    items:
+      - [ [ 'pet_rat_#00', 3 ], 15 ]
+      - [ [ 'pet_pig_#00', 2 ], 25 ]
+      - [ [ 'pet_cat_#00', 2 ], 15 ]
+      - [ [ 'angryc_#00', 1 ], 15]
+      - [ [ 'pet_snake_#00', 1 ], 25]
+      - [ [ 'tekel_#00', 1 ], 5]
+  -
+    min: 25
+    items:
+      - [ [ 'pet_rat_#00', 3 ], 5 ]
+      - [ [ 'pet_pig_#00', 2 ], 15 ]
+      - [ [ 'pet_snake_#00', 1 ], 15 ]
+      - [ [ 'angryc_#00', 2 ], 15 ]
+      - [ [ 'tekel_#00', 1 ], 25 ]
+      - [ [ 'pet_dog_#00', 1 ], 25 ]
