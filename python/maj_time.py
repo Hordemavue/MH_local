@@ -8,7 +8,7 @@ mdp = "admin"
 
 morts = [34,37, 39, 40]
 
-base_url = "http://myhordes.localhost"
+base_url = "http://192.168.0.246:8081"
 connexion_url = base_url + "/jx/public/login"
 maj_url = base_url + "/jx/beyond/desert/cached"
 
