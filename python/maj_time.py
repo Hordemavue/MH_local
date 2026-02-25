@@ -5,12 +5,12 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
 mdp = "admin"
-
-morts = [34,37, 39, 40]
-
 base_url = "http://192.168.0.246:8081"
+morts = [34,37, 39, 40, 1, 13, 21, 35]
+
 connexion_url = base_url + "/jx/public/login"
 maj_url = base_url + "/jx/beyond/desert/cached"
+gazette_url = base_url + "/jx/game/raventimes"
 
 options = Options()
 options.add_argument("--incognito")
@@ -39,7 +39,7 @@ for u in range (1,41):
         driver.execute_script("arguments[0].click();", login_button)
 
         # 5️⃣ Attendre que la page soit complètement chargée après login
-        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "li.town-news[x-ajax-href='http://myhordes.localhost/jx/game/raventimes']")))
+        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, f"li.town-news[x-ajax-href='{gazette_url}']")))
 
         # 6️⃣ Aller sur la page de maj
         driver.get(maj_url)
