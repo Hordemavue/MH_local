@@ -106,6 +106,4 @@ Permet de :
 Script utilisé pour :
 
 - Mettre à jour la table `zone_perso`  
-- Indiquer si une case est :
-  - explorée  
-  - visitée aujourd’hui  
+- Indiquer si une case est épuisée ou son niveau de regen
